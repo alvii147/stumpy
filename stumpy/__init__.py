@@ -16,6 +16,7 @@ from .ostinato import ostinato, ostinatoed  # noqa: F401
 from .aamp_ostinato import aamp_ostinato, aamp_ostinatoed  # noqa: F401
 from .scrump import scrump, prescrump  # noqa: F401
 from .scraamp import scraamp, prescraamp  # noqa: F401
+from .shrimp import shrimp  # noqa: F401
 from .stumpi import stumpi  # noqa: F401
 from .mpdist import mpdist, mpdisted  # noqa: F401
 from .aampdist import aampdist, aampdisted  # noqa: F401
