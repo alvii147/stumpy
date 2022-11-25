@@ -18,7 +18,7 @@ def test_SHRIMP_consistency():
     T_A = np.random.rand(n_A)
     T_B = np.random.rand(n_B)
 
-    P_TEST, I_TEST = shrimp(T_A=T_A, T_B=T_B, m=m)
+    P_TEST, I_TEST = shrimp(T_A=T_A, T_B=T_B, m=m, ignore_trivial=False)
 
     for i, j in enumerate(I_TEST):
         i, j = int(i), int(j)
