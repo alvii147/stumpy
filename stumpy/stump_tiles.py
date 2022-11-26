@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @njit(
     # "(f8[:], f8[:], i8, f8[:], f8[:], f8[:], f8[:], f8[:], f8[:], f8[:], f8[:],"
-    # "b1[:], b1[:], b1[:], b1[:], i8[:, :, :], i8[:, :], i8, f8[:, :, :], f8[:, :],
+    # "b1[:], b1[:], b1[:], b1[:], i8[:, :], i8, i8[:], i8, f8[:, :, :], f8[:, :],
     # f8[:, :], i8[:, :, :], i8[:, :], i8[:, :], b1)",
     fastmath=True,
 )
@@ -36,8 +36,9 @@ def _compute_tiles(
     T_B_subseq_isfinite,
     T_A_subseq_isconstant,
     T_B_subseq_isconstant,
-    tiles,
-    tiles_ranges,
+    tiles_indices,
+    tiles_per_thread,
+    diags,
     thread_idx,
     ρ,
     ρL,
@@ -107,11 +108,14 @@ def _compute_tiles(
     T_B_subseq_isconstant : numpy.ndarray
         A boolean array that indicates whether a subsequence in `T_B` is constant (True)
 
-    tiles : ndarray
-        A 7-column, 2D array, where each row corresponds to a single tile
+    tiles_indices : ndarray
+        Row and column index pairs of tiles
 
-    tiles_ranges : ndarray
-        A 2D array representing tile indices for each thread
+    tiles_per_thread : int
+        Number of tiles to traverse per thread
+
+    diags : numpy.ndarray
+        The diagonal indices
 
     thread_idx : int
         The thread index
@@ -169,6 +173,8 @@ def _compute_tiles(
     m_inverse = 1.0 / m
     constant = (m - 1) * m_inverse * m_inverse  # (m - 1)/(m * m)
     uint64_m = np.uint64(m)
+    l = T_A.shape[0] - m + 1
+    w = T_B.shape[0] - m + 1
 
     # for storing diagonal iteration ranges
     iter_ranges = np.zeros((config.STUMPY_N_DIAGONALS, 3), dtype=np.int64)
@@ -177,16 +183,24 @@ def _compute_tiles(
     # for storing range of diagonals to traverse in chunks
     chunk_diags_range = np.arange(config.STUMPY_N_DIAGONALS)
 
-    for tile_idx in range(tiles_ranges[thread_idx, 0], tiles_ranges[thread_idx, 1]):
+    tiles_start_idx = thread_idx * tiles_per_thread
+    tiles_end_idx = min(tiles_start_idx + tiles_per_thread, tiles_indices.shape[0])
+    for tile_idx in range(tiles_start_idx, tiles_end_idx):
         (
-            tile_i,  # i location of current tile in distance profile
-            tile_j,  # j location of current tile in distance profile
-            tile_height,  # height of current tile
-            tile_width,  # width of current tile
-            tile_start_diag,  # index of first diagonal to traverse on current tile
-            tile_stop_diag,  # index of last diagonal to traverse on current tile + 1
-            _,
-        ) = tiles[tile_idx]
+            tile_i,
+            tile_j,
+            tile_height,
+            tile_width,
+            tile_start_diag,
+            tile_stop_diag,
+        ) = core._get_tile(
+            tiles_indices[tile_idx, 0],
+            tiles_indices[tile_idx, 1],
+            l,
+            w,
+            diags,
+            config.STUMPY_MAX_TILE_SIZE,
+        )
 
         # chunk_start_idx is the starting index of the chunk we are dealing with
         for chunk_start_idx in range(
@@ -475,6 +489,7 @@ def _stump_tiles(
     n_A = T_A.shape[0]
     n_B = T_B.shape[0]
     l = n_A - m + 1
+    w = n_B - m + 1
     n_threads = numba.config.NUMBA_NUM_THREADS
 
     ρ = np.full((n_threads, l, k), np.NINF, dtype=np.float64)
@@ -486,8 +501,10 @@ def _stump_tiles(
     ρR = np.full((n_threads, l), np.NINF, dtype=np.float64)
     IR = np.full((n_threads, l), -1, dtype=np.int64)
 
-    tiles = core._get_tiles(m, n_A, n_B, diags, config.STUMPY_MAX_TILE_SIZE)
-    tiles_ranges = core._get_array_ranges(tiles[:, 6], n_threads, False)
+    tile_rows = np.arange(0, l, config.STUMPY_MAX_TILE_SIZE)
+    tile_cols = np.arange(0, w, config.STUMPY_MAX_TILE_SIZE)
+    tiles_indices = np.argwhere(tile_cols + tile_rows.reshape(-1, 1) > diags[0] - 1)
+    tiles_per_thread = int(np.ceil(tiles_indices.shape[0] / n_threads))
 
     cov_a = T_B[m - 1 :] - M_T_m_1[:-1]
     cov_b = T_A[m - 1 :] - μ_Q_m_1[:-1]
@@ -525,8 +542,9 @@ def _stump_tiles(
             T_B_subseq_isfinite,
             T_A_subseq_isconstant,
             T_B_subseq_isconstant,
-            tiles,
-            tiles_ranges,
+            tiles_indices,
+            tiles_per_thread,
+            diags,
             thread_idx,
             ρ,
             ρL,

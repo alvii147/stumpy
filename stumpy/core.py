@@ -7,7 +7,7 @@ import functools
 import inspect
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 from scipy.signal import convolve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy import linalg
@@ -2888,75 +2888,13 @@ def _find_matches(
 
 
 @njit(
-    # "(i8, i8, i8, i8[:], i8)"
+    # "(i8, i8, i8, i8, i8[:], i8)"
     fastmath=True,
-    parallel=True,
 )
-def _get_tiles(m, n_A, n_B, diags, tile_size):
-    """
-    Split distance matrix into tiles of given size
+def _get_tile(i, j, l, w, diags, tile_size):
+    tile_i, tile_j = i * tile_size, j * tile_size
+    tile_height, tile_width = min(tile_size, l - tile_i), min(tile_size, w - tile_j)
+    tile_start_diag = max(-(tile_height - 1), diags[0] + tile_i - tile_j)
+    tile_stop_diag = min(tile_width, diags[-1] + 1 + tile_i - tile_j)
 
-    Parameters
-    ----------
-    m : int
-        Window size
-
-    n_A : ndarray
-        The length of time series `T_A`
-
-    n_B : ndarray
-        The length of time series `T_B`
-
-    diags : ndarray
-        The diagonal indices of interest
-
-    tile_size : int
-        Maximum length of a tile
-
-    Returns
-    -------
-    tiles : ndarray
-        A 7-column, 2D array, where each row corresponds to a single tile:
-        - First two columns represent i and j positions of the tile
-        - Second two columns represent dimensions of the tile
-        - Third two columns represent range of diagonal indices to traverse in the tile
-        - Seventh column represents number of distances in the tile
-    """
-    # dimensions of distance matrix
-    l = n_A - m + 1
-    w = n_B - m + 1
-    # tile rows & columns
-    tile_rows = int(np.ceil(l / tile_size))
-    tile_columns = int(np.ceil(w / tile_size))
-    # number of tiles
-    tiles_count = tile_rows * tile_columns
-    tiles = np.empty((tiles_count, 7), dtype=np.int64)
-
-    for tile_idx in prange(tiles_count):
-        tile_i = (tile_idx // tile_columns) * tile_size
-        tile_j = (tile_idx % tile_columns) * tile_size
-        # height of current tile
-        tile_height = min(tile_size, l - tile_i)
-        # width of current tile
-        tile_width = min(tile_size, w - tile_j)
-
-        # start and stop diagonal indices to traverse within tile
-        tile_start_diag = max(-(tile_height - 1), diags[0] + tile_i - tile_j)
-        tile_stop_diag = min(tile_width, diags[-1] + 1 + tile_i - tile_j)
-
-        tile_ndist = _total_diagonal_ndists(
-            tile_start_diag,
-            tile_stop_diag,
-            tile_height,
-            tile_width,
-        )
-
-        tiles[tile_idx, 0] = tile_i
-        tiles[tile_idx, 1] = tile_j
-        tiles[tile_idx, 2] = tile_height
-        tiles[tile_idx, 3] = tile_width
-        tiles[tile_idx, 4] = tile_start_diag
-        tiles[tile_idx, 5] = tile_stop_diag
-        tiles[tile_idx, 6] = tile_ndist
-
-    return tiles
+    return tile_i, tile_j, tile_height, tile_width, tile_start_diag, tile_stop_diag
