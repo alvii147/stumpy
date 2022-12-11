@@ -502,8 +502,14 @@ def _stump_tiles(
     IR = np.full((n_threads, l), -1, dtype=np.int64)
 
     tile_rows = np.arange(0, l, config.STUMPY_MAX_TILE_SIZE)
-    tile_cols = np.arange(0, w, config.STUMPY_MAX_TILE_SIZE)
-    tiles_indices = np.argwhere(tile_cols + tile_rows.reshape(-1, 1) > diags[0] - 1)
+    tile_cols = (
+        np.arange(0, w, config.STUMPY_MAX_TILE_SIZE) + config.STUMPY_MAX_TILE_SIZE
+    )
+    tiles_indices = np.argwhere(
+        (tile_cols + config.STUMPY_MAX_TILE_SIZE)
+        + (tile_rows + config.STUMPY_MAX_TILE_SIZE).reshape(-1, 1)
+        > diags[0] - 1
+    )
     tiles_per_thread = int(np.ceil(tiles_indices.shape[0] / n_threads))
 
     cov_a = T_B[m - 1 :] - M_T_m_1[:-1]
