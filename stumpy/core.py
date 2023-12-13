@@ -2,18 +2,18 @@
 # Copyright 2019 TD Ameritrade. Released under the terms of the 3-Clause BSD license.  # noqa: E501
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
-import logging
 import functools
 import inspect
+import math
+import tempfile
+import warnings
 
 import numpy as np
-from numba import njit
-from scipy.signal import convolve
-from scipy.ndimage import maximum_filter1d, minimum_filter1d
+from numba import cuda, njit, prange
 from scipy import linalg
+from scipy.ndimage import maximum_filter1d, minimum_filter1d
+from scipy.signal import convolve
 from scipy.spatial.distance import cdist
-import tempfile
-import math
 
 from . import config
 
@@ -22,8 +22,6 @@ try:
 except ImportError:
     pass
 
-logger = logging.getLogger(__name__)
-
 
 def _compare_parameters(norm, non_norm, exclude=None):
     """
@@ -31,11 +29,11 @@ def _compare_parameters(norm, non_norm, exclude=None):
 
     Parameters
     ----------
-    norm : object
+    norm : function
         The normalized function (or class) that is complementary to the
         non-normalized function (or class)
 
-    non_norm : object
+    non_norm : function
         The non-normalized function (or class) that is complementary to the
         z-normalized function (or class)
 
@@ -60,11 +58,13 @@ def _compare_parameters(norm, non_norm, exclude=None):
 
     is_same_params = set(norm_params) == set(non_norm_params)
     if not is_same_params:
-        if exclude is not None:
-            logger.warning(f"Excluding `{exclude}` parameters, ")
-        logger.warning(f"`{norm}`: ({norm_params}) and ")
-        logger.warning(f"`{non_norm}`: ({non_norm_params}) ")
-        logger.warning("have different parameters.")
+        msg = ""
+        if exclude is not None or (isinstance(exclude, list) and len(exclude)):
+            msg += f"Excluding `{exclude}` parameters, "
+        msg += f"function `{norm.__name__}({norm_params}) and "
+        msg += f"function `{non_norm.__name__}({non_norm_params}) "
+        msg += "have different arguments/parameters."
+        warnings.warn(msg)
 
     return is_same_params
 
@@ -98,14 +98,15 @@ def non_normalized(non_norm, exclude=None, replace=None):
 
     Parameters
     ----------
-    non_norm : object
+    non_norm : function
         The non-normalized function (or class) that is complementary to the
         z-normalized function (or class)
 
     exclude : list, default None
         A list of function (or class) parameter names to exclude when comparing the
         function (or class) signatures. When `exlcude is None`, this parameter is
-        automatically set to `exclude = ["normalize", "p"]` by default.
+        automatically set to `exclude = ["normalize", "p", "T_A_subseq_isconstant",
+        T_B_subseq_isconstant]` by default.
 
     replace : dict, default None
         A dictionary of function (or class) parameter key-value pairs. Each key that
@@ -117,11 +118,16 @@ def non_normalized(non_norm, exclude=None, replace=None):
 
     Returns
     -------
-    outer_wrapper : object
+    outer_wrapper : function
         The desired z-normalized/non-normalized function (or class)
     """
     if exclude is None:
-        exclude = ["normalize", "p"]
+        exclude = [
+            "normalize",
+            "p",
+            "T_A_subseq_isconstant",
+            "T_B_subseq_isconstant",
+        ]
 
     @functools.wraps(non_norm)
     def outer_wrapper(norm):
@@ -149,6 +155,14 @@ def non_normalized(non_norm, exclude=None, replace=None):
 def driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Helper function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     _raise_driver_not_found()
 
@@ -156,6 +170,14 @@ def driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_stump_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -163,6 +185,14 @@ def _gpu_stump_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_aamp_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -170,6 +200,14 @@ def _gpu_aamp_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_ostinato_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -177,6 +215,14 @@ def _gpu_ostinato_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_aamp_ostinato_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -184,6 +230,14 @@ def _gpu_aamp_ostinato_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_mpdist_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -191,6 +245,14 @@ def _gpu_mpdist_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_aampdist_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -198,6 +260,14 @@ def _gpu_aampdist_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_stimp_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -205,6 +275,14 @@ def _gpu_stimp_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_aamp_stimp_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -212,6 +290,14 @@ def _gpu_aamp_stimp_driver_not_found(*args, **kwargs):  # pragma: no cover
 def _gpu_searchsorted_left_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -219,6 +305,14 @@ def _gpu_searchsorted_left_driver_not_found(*args, **kwargs):  # pragma: no cove
 def _gpu_searchsorted_right_driver_not_found(*args, **kwargs):  # pragma: no cover
     """
     Dummy function to raise CudaSupportError driver not found error.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     driver_not_found()
 
@@ -226,6 +320,14 @@ def _gpu_searchsorted_right_driver_not_found(*args, **kwargs):  # pragma: no cov
 def get_pkg_name():  # pragma: no cover
     """
     Return package name.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
     """
     return __name__.split(".")[0]
 
@@ -290,6 +392,10 @@ def check_nan(a):  # pragma: no cover
     a : numpy.ndarray
         NumPy array
 
+    Returns
+    -------
+    None
+
     Raises
     ------
     ValueError
@@ -314,6 +420,10 @@ def check_dtype(a, dtype=np.float64):  # pragma: no cover
     dtype : dtype, default np.float64
         NumPy `dtype`
 
+    Returns
+    -------
+    None
+
     Raises
     ------
     TypeError
@@ -323,6 +433,8 @@ def check_dtype(a, dtype=np.float64):  # pragma: no cover
         dtype = np.int64
     if dtype == float:
         dtype = np.float64
+    if dtype == bool:
+        dtype = np.bool_
     if not np.issubdtype(a.dtype, dtype):
         msg = f"{dtype} dtype expected but found {a.dtype} in input array\n"
         msg += "Please change your input `dtype` with `.astype(dtype)`"
@@ -372,7 +484,7 @@ def are_arrays_equal(a, b):  # pragma: no cover
     Returns
     -------
     output : bool
-        Returns `True` if the arrays are equal and `False` otherwise.
+        This is `True` if the arrays are equal and `False` otherwise.
     """
     if id(a) == id(b):
         return True
@@ -383,7 +495,7 @@ def are_arrays_equal(a, b):  # pragma: no cover
     if a.shape != b.shape:
         return False
 
-    return ((a == b) | (np.isnan(a) & np.isnan(b))).all()
+    return bool(((a == b) | (np.isnan(a) & np.isnan(b))).all())
 
 
 def are_distances_too_small(a, threshold=10e-6):  # pragma: no cover
@@ -404,7 +516,7 @@ def are_distances_too_small(a, threshold=10e-6):  # pragma: no cover
     Returns
     -------
     output : bool
-        Returns `True` if the matrix profile distances are all below the
+        This is `True` if the matrix profile distances are all below the
         threshold and `False` if they are all above the threshold.
     """
     if a.mean() < threshold or np.all(a < threshold):
@@ -496,9 +608,9 @@ def _sliding_dot_product(Q, T):
         Sliding dot product between `Q` and `T`.
     """
     m = Q.shape[0]
-    k = T.shape[0] - m + 1
-    out = np.empty(k)
-    for i in range(k):
+    l = T.shape[0] - m + 1
+    out = np.empty(l)
+    for i in range(l):
         out[i] = np.dot(Q, T[i : i + m])
 
     return out
@@ -659,17 +771,41 @@ def welford_nanstd(a, w=None):
     return np.sqrt(np.clip(welford_nanvar(a, w), a_min=0, a_max=None))
 
 
-def rolling_nanstd(a, w):
+@njit(parallel=True, fastmath={"nsz", "arcp", "contract", "afn", "reassoc"})
+def _rolling_nanstd_1d(a, w):
     """
-    Compute the rolling standard deviation for 1-D and 2-D arrays while ignoring NaNs
-    using a modified version of Welford's algorithm but is much faster than using
-    `np.nanstd` with stride tricks.
+    A Numba JIT-compiled and parallelized function for computing the rolling standard
+    deviation for 1-D array while ignoring NaN.
 
-    This a convenience wrapper around `welford_nanstd`.
+    Parameters
+    ----------
+    a : numpy.ndarray
+        The input array
+
+    w : int
+        The rolling window size
+
+    Returns
+    -------
+    out : numpy.ndarray
+        This 1D array has the length of `a.shape[0]-w+1`. `out[i]`
+        contains the stddev value of `a[i : i + w]`
+    """
+    n = a.shape[0] - w + 1
+    out = np.empty(n, dtype=np.float64)
+    for i in prange(n):
+        out[i] = np.nanstd(a[i : i + w])
+
+    return out
+
+
+def rolling_nanstd(a, w, welford=False):
+    """
+    Compute the rolling standard deviation over the last axis of `a` while ignoring
+    NaNs.
 
     This essentially replaces:
-
-        `np.nanstd(rolling_window(T[..., start:stop], m), axis=T.ndim)`
+        `np.nanstd(rolling_window(a[..., start:stop], w), axis=a.ndim)`
 
     Parameters
     ----------
@@ -679,15 +815,26 @@ def rolling_nanstd(a, w):
     w : numpy.ndarray
         The rolling window size
 
+    welford : bool, default False
+        When False (default), the computation is parallelized and the stddev of
+        each subsequence is calculated on its own. When `welford==True`, the
+        welford method is used to reduce the computing time at the cost of slightly
+        reduced precision.
+
     Returns
     -------
-    output : numpy.ndarray
-        Rolling window nanstd.
+    out : numpy.ndarray
+        Rolling window nanstd
     """
     axis = a.ndim - 1  # Account for rolling
-    return np.apply_along_axis(
-        lambda a_row, w: welford_nanstd(a_row, w), axis=axis, arr=a, w=w
-    )
+    if welford:
+        return np.apply_along_axis(
+            lambda a_row, w: welford_nanstd(a_row, w), axis=axis, arr=a, w=w
+        )
+    else:
+        return np.apply_along_axis(
+            lambda a_row, w: _rolling_nanstd_1d(a_row, w), axis=axis, arr=a, w=w
+        )
 
 
 def _rolling_nanmin_1d(a, w=None):
@@ -696,7 +843,7 @@ def _rolling_nanmin_1d(a, w=None):
 
     This essentially replaces:
 
-        `np.nanmin(rolling_window(T[..., start:stop], m), axis=T.ndim)`
+        `np.nanmin(rolling_window(a[..., start:stop], w), axis=a.ndim)`
 
     Parameters
     ----------
@@ -726,7 +873,7 @@ def _rolling_nanmax_1d(a, w=None):
 
     This essentially replaces:
 
-        `np.nanmax(rolling_window(T[..., start:stop], m), axis=T.ndim)`
+        `np.nanmax(rolling_window(a[..., start:stop], w), axis=a.ndim)`
 
     Parameters
     ----------
@@ -758,7 +905,7 @@ def rolling_nanmin(a, w):
 
     This essentially replaces:
 
-        `np.nanmin(rolling_window(T[..., start:stop], m), axis=T.ndim)`
+        `np.nanmin(rolling_window(a[..., start:stop], w), axis=a.ndim)`
 
     Parameters
     ----------
@@ -787,7 +934,7 @@ def rolling_nanmax(a, w):
 
     This essentially replaces:
 
-        `np.nanmax(rolling_window(T[..., start:stop], m), axis=T.ndim)`
+        `np.nanmax(rolling_window(a[..., start:stop], w), axis=a.ndim)`
 
     Parameters
     ----------
@@ -895,12 +1042,13 @@ def compute_mean_std(T, m):
 
 @njit(
     # "f8(i8, f8, f8, f8, f8, f8)",
-    fastmath=True
+    fastmath={"nsz", "arcp", "contract", "afn", "reassoc"}
 )
-def _calculate_squared_distance(m, QT, μ_Q, σ_Q, M_T, Σ_T):
+def _calculate_squared_distance(
+    m, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant
+):
     """
-    Compute a single squared distance given all scalar inputs. This function serves as
-    the single source of truth for how all distances should be calculated.
+    Compute a single squared distance given all scalar inputs.
 
     Parameters
     ----------
@@ -908,19 +1056,27 @@ def _calculate_squared_distance(m, QT, μ_Q, σ_Q, M_T, Σ_T):
         Window size
 
     QT : float
-        Dot product between `Q[i]` and `T[i]`
+        Pre-computed dot product between `Q` and the ith subsequence in `T`, each with
+        length `m`
 
     μ_Q : float
-        Mean of `Q[i]`
+        Mean of `Q`
 
     σ_Q : float
-        Standard deviation of `Q[i]`
+        Standard deviation of `Q`
 
     M_T : float
-        Sliding mean of `T[i]`
+        Mean of the ith subsequence in `T`
 
     Σ_T : float
-        Sliding standard deviation of `T[i]`
+        Standard deviation of the ith subsequence in `T`
+
+    Q_subseq_isconstant : bool
+        A boolean value that indicates whether the subsequence `Q` is constant (True)
+
+    T_subseq_isconstant : bool
+        A boolean value that indicates whether the ith subsequence in `T` is
+        constant (True)
 
     Returns
     -------
@@ -936,20 +1092,18 @@ def _calculate_squared_distance(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     """
     if np.isinf(M_T) or np.isinf(μ_Q):
         D_squared = np.inf
+    elif Q_subseq_isconstant and T_subseq_isconstant:
+        D_squared = 0
+    elif Q_subseq_isconstant or T_subseq_isconstant:
+        D_squared = m
     else:
-        if σ_Q < config.STUMPY_STDDEV_THRESHOLD or Σ_T < config.STUMPY_STDDEV_THRESHOLD:
-            D_squared = m
-        else:
-            denom = m * σ_Q * Σ_T
-            if np.abs(denom) < config.STUMPY_DENOM_THRESHOLD:  # pragma nocover
-                denom = config.STUMPY_DENOM_THRESHOLD
-            D_squared = np.abs(2 * m * (1.0 - (QT - m * μ_Q * M_T) / denom))
+        denom = (σ_Q * Σ_T) * m
+        denom = max(denom, config.STUMPY_DENOM_THRESHOLD)
 
-        if (
-            σ_Q < config.STUMPY_STDDEV_THRESHOLD
-            and Σ_T < config.STUMPY_STDDEV_THRESHOLD
-        ) or D_squared < config.STUMPY_P_NORM_THRESHOLD:
-            D_squared = 0
+        ρ = (QT - (μ_Q * M_T) * m) / denom
+        ρ = min(ρ, 1.0)
+
+        D_squared = np.abs(2 * m * (1.0 - ρ))
 
     return D_squared
 
@@ -958,7 +1112,9 @@ def _calculate_squared_distance(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     # "f8[:](i8, f8[:], f8, f8, f8[:], f8[:])",
     fastmath=True,
 )
-def _calculate_squared_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
+def _calculate_squared_distance_profile(
+    m, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant
+):
     """
     Compute the squared distance profile
 
@@ -982,6 +1138,12 @@ def _calculate_squared_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     Σ_T : numpy.ndarray
         Sliding standard deviation of `T`
 
+    Q_subseq_isconstant : bool
+        A boolean value that indicates whether the subsequence `Q` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
     Returns
     -------
     D_squared : numpy.ndarray
@@ -998,7 +1160,16 @@ def _calculate_squared_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     D_squared = np.empty(k, dtype=np.float64)
 
     for i in range(k):
-        D_squared[i] = _calculate_squared_distance(m, QT[i], μ_Q, σ_Q, M_T[i], Σ_T[i])
+        D_squared[i] = _calculate_squared_distance(
+            m,
+            QT[i],
+            μ_Q,
+            σ_Q,
+            M_T[i],
+            Σ_T[i],
+            Q_subseq_isconstant,
+            T_subseq_isconstant[i],
+        )
 
     return D_squared
 
@@ -1007,7 +1178,9 @@ def _calculate_squared_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     # "f8[:](i8, f8[:], f8, f8, f8[:], f8[:])",
     fastmath=True,
 )
-def calculate_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
+def calculate_distance_profile(
+    m, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant
+):
     """
     Compute the distance profile
 
@@ -1031,6 +1204,12 @@ def calculate_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
     Σ_T : numpy.ndarray
         Sliding standard deviation of `T`
 
+    Q_subseq_isconstant : bool
+        A boolean value that indicates whether the subsequence `Q` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
     Returns
     -------
     output : numpy.ndarray
@@ -1043,7 +1222,9 @@ def calculate_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T):
 
     See Equation on Page 4
     """
-    D_squared = _calculate_squared_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T)
+    D_squared = _calculate_squared_distance_profile(
+        m, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant
+    )
 
     return np.sqrt(D_squared)
 
@@ -1071,22 +1252,22 @@ def _p_norm_distance_profile(Q, T, p=2.0):
         p-normalized distance profile between `Q` and `T`
     """
     m = Q.shape[0]
-    k = T.shape[0] - m + 1
-    p_norm_profile = np.empty(k, dtype=np.float64)
+    l = T.shape[0] - m + 1
+    p_norm_profile = np.empty(l, dtype=np.float64)
 
     if p == 2.0:
         Q_squared = np.sum(Q * Q)
-        T_squared = np.empty(k, dtype=np.float64)
+        T_squared = np.empty(l, dtype=np.float64)
         T_squared[0] = np.sum(T[:m] * T[:m])
-        for i in range(1, k):
+        for i in range(1, l):
             T_squared[i] = (
                 T_squared[i - 1] - T[i - 1] * T[i - 1] + T[i + m - 1] * T[i + m - 1]
             )
         QT = _sliding_dot_product(Q, T)
-        for i in range(k):
+        for i in range(l):
             p_norm_profile[i] = Q_squared + T_squared[i] - 2.0 * QT[i]
     else:
-        for i in range(k):
+        for i in range(l):
             p_norm_profile[i] = np.sum(np.power(np.abs(Q - T[i : i + m]), p))
 
     return p_norm_profile
@@ -1105,7 +1286,9 @@ def _mass_absolute(Q, T, p=2.0):
         Time series or sequence
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -1119,7 +1302,7 @@ def _mass_absolute(Q, T, p=2.0):
     ).flatten()
 
 
-def mass_absolute(Q, T, T_subseq_isfinite=None, p=2.0):
+def mass_absolute(Q, T, T_subseq_isfinite=None, p=2.0, query_idx=None):
     """
     Compute the non-normalized distance profile (i.e., without z-normalization) using
     the "MASS absolute" algorithm. This is a convenience wrapper around the Numba JIT
@@ -1138,7 +1321,16 @@ def mass_absolute(Q, T, T_subseq_isfinite=None, p=2.0):
         `np.nan`/`np.inf` value (False)
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
+
+    query_idx : int, default None
+        This is the index position along the time series, `T`, where the query
+        subsequence, `Q`, is located. `query_idx` should be set to None if `Q`
+        is not a subsequence of `T`. If `Q` is a subsequence of `T`, provding
+        this argument is optional. If query_idx is provided, the distance between
+        Q and T[query_idx : query_idx + m] will automatically be set to zero.
 
     Returns
     -------
@@ -1152,13 +1344,29 @@ def mass_absolute(Q, T, T_subseq_isfinite=None, p=2.0):
     """
     Q = _preprocess(Q)
     m = Q.shape[0]
-    check_window_size(m, max_size=Q.shape[-1])
 
     if Q.ndim == 2 and Q.shape[1] == 1:  # pragma: no cover
+        warnings.warn("`Q` must be 1-dimensional and was automatically flattened")
         Q = Q.flatten()
 
     if Q.ndim != 1:  # pragma: no cover
-        raise ValueError(f"Q is {Q.ndim}-dimensional and must be 1-dimensional. ")
+        raise ValueError(f"`Q` is {Q.ndim}-dimensional and must be 1-dimensional. ")
+    Q_isfinite = np.isfinite(Q)
+
+    check_window_size(m, max_size=Q.shape[-1])
+
+    if query_idx is not None:  # pragma: no cover
+        query_idx = int(query_idx)
+        T_isfinite_idx = np.isfinite(T[query_idx : query_idx + m])
+        if not np.all(Q_isfinite == T_isfinite_idx) or not np.allclose(
+            Q[Q_isfinite], T[query_idx : query_idx + m][T_isfinite_idx]
+        ):
+            msg = (
+                "Subsequences `Q` and `T[query_idx:query_idx+m]` are "
+                + "different but were expected to be identical. Please "
+                + "verify that `query_idx` is correct."
+            )
+            warnings.warn(msg)
 
     T = _preprocess(T)
     n = T.shape[0]
@@ -1176,12 +1384,15 @@ def mass_absolute(Q, T, T_subseq_isfinite=None, p=2.0):
         )
 
     distance_profile = np.empty(n - m + 1, dtype=np.float64)
-    if np.any(~np.isfinite(Q)):
+    if np.any(~Q_isfinite):
         distance_profile[:] = np.inf
     else:
         if T_subseq_isfinite is None:
             T, T_subseq_isfinite = preprocess_non_normalized(T, m)
         distance_profile[:] = _mass_absolute(Q, T, p)
+        if query_idx is not None:  # pragma: no cover
+            distance_profile[query_idx] = 0.0
+
         distance_profile[~T_subseq_isfinite] = np.inf
 
     return distance_profile
@@ -1207,7 +1418,9 @@ def _mass_absolute_distance_matrix(Q, T, m, distance_matrix, p=2.0):
         The full output distance matrix. This is mandatory since it may be reused.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -1294,7 +1507,7 @@ def mueen_calculate_distance_profile(Q, T):
     # "f8[:](f8[:], f8[:], f8[:], f8, f8, f8[:], f8[:])",
     fastmath=True
 )
-def _mass(Q, T, QT, μ_Q, σ_Q, M_T, Σ_T):
+def _mass(Q, T, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant):
     """
     A Numba JIT compiled algorithm for computing the distance profile using the MASS
     algorithm.
@@ -1328,6 +1541,12 @@ def _mass(Q, T, QT, μ_Q, σ_Q, M_T, Σ_T):
     Σ_T : numpy.ndarray
         Sliding standard deviation of `T`
 
+    Q_subseq_isconstant : bool
+        A boolean value that indicates whether the subsequence `Q` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
     Returns
     -------
     output : numpy.ndarray
@@ -1347,12 +1566,22 @@ def _mass(Q, T, QT, μ_Q, σ_Q, M_T, Σ_T):
     """
     m = Q.shape[0]
 
-    return calculate_distance_profile(m, QT, μ_Q, σ_Q, M_T, Σ_T)
+    return calculate_distance_profile(
+        m, QT, μ_Q, σ_Q, M_T, Σ_T, Q_subseq_isconstant, T_subseq_isconstant
+    )
 
 
 @non_normalized(
     mass_absolute,
-    exclude=["normalize", "M_T", "Σ_T", "T_subseq_isfinite", "p"],
+    exclude=[
+        "normalize",
+        "M_T",
+        "Σ_T",
+        "T_subseq_isfinite",
+        "p",
+        "T_subseq_isconstant",
+        "Q_subseq_isconstant",
+    ],
     replace={"M_T": "T_subseq_isfinite", "Σ_T": None},
 )
 def mass(
@@ -1363,6 +1592,9 @@ def mass(
     normalize=True,
     p=2.0,
     T_subseq_isfinite=None,
+    T_subseq_isconstant=None,
+    Q_subseq_isconstant=None,
+    query_idx=None,
 ):
     """
     Compute the distance profile using the MASS algorithm
@@ -1392,10 +1624,38 @@ def mass(
         The p-norm to apply for computing the Minkowski distance. This parameter is
         ignored when `normalize == True`.
 
-    T_subseq_isfinite : numpy.ndarray
+    T_subseq_isfinite : numpy.ndarray, default None
         A boolean array that indicates whether a subsequence in `T` contains a
         `np.nan`/`np.inf` value (False). This parameter is ignored when
         `normalize=True`.
+
+    T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    Q_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether the subsequence in `Q` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether the subsequence in `Q` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    query_idx : int, default None
+        This is the index position along the time series, `T`, where the query
+        subsequence, `Q`, is located. `query_idx` should be set to None if `Q`
+        is not a subsequence of `T`. If `Q` is a subsequence of `T`, provding
+        this argument is optional. If query_idx is provided, the distance
+        between Q and `T[query_idx : query_idx + m]` will automatically be set to
+        zero.
 
     Returns
     -------
@@ -1421,6 +1681,8 @@ def mass(
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> stumpy.mass(
     ...     np.array([-11.1, 23.4, 79.5, 1001.0]),
     ...     np.array([584., -11., 23., 79., 1001., 0., -19.]))
@@ -1428,13 +1690,29 @@ def mass(
     """
     Q = _preprocess(Q)
     m = Q.shape[0]
-    check_window_size(m, max_size=Q.shape[-1])
 
     if Q.ndim == 2 and Q.shape[1] == 1:  # pragma: no cover
+        warnings.warn("`Q` must be 1-dimensional and was automatically flattened")
         Q = Q.flatten()
 
     if Q.ndim != 1:  # pragma: no cover
         raise ValueError(f"Q is {Q.ndim}-dimensional and must be 1-dimensional. ")
+    Q_isfinite = np.isfinite(Q)
+
+    check_window_size(m, max_size=Q.shape[-1])
+
+    if query_idx is not None:
+        query_idx = int(query_idx)
+        T_isfinite_idx = np.isfinite(T[query_idx : query_idx + m])
+        if not np.all(Q_isfinite == T_isfinite_idx) or not np.allclose(
+            Q[Q_isfinite], T[query_idx : query_idx + m][T_isfinite_idx]
+        ):  # pragma: no cover
+            msg = (
+                "Subsequences `Q` and `T[query_idx:query_idx+m]` are "
+                + "different but were expected to be identical. Please "
+                + "verify that `query_idx` is correct."
+            )
+            warnings.warn(msg)
 
     T = _preprocess(T)
     n = T.shape[0]
@@ -1452,22 +1730,57 @@ def mass(
         )
 
     distance_profile = np.empty(n - m + 1, dtype=np.float64)
-    if np.any(~np.isfinite(Q)):
+    if np.any(~Q_isfinite):
         distance_profile[:] = np.inf
     else:
-        if M_T is None or Σ_T is None:
-            T, M_T, Σ_T = preprocess(T, m)
+        T, M_T, Σ_T, T_subseq_isconstant = preprocess(
+            T,
+            m,
+            copy=False,
+            M_T=M_T,
+            Σ_T=Σ_T,
+            T_subseq_isconstant=T_subseq_isconstant,
+        )
 
         QT = sliding_dot_product(Q, T)
-        μ_Q, σ_Q = compute_mean_std(Q, m)
-        μ_Q = μ_Q[0]
-        σ_Q = σ_Q[0]
-        distance_profile[:] = _mass(Q, T, QT, μ_Q, σ_Q, M_T, Σ_T)
+        Q, μ_Q, σ_Q, Q_subseq_isconstant = preprocess(
+            Q,
+            m,
+            copy=False,
+            T_subseq_isconstant=Q_subseq_isconstant,
+        )
+
+        distance_profile[:] = _mass(
+            Q,
+            T,
+            QT,
+            μ_Q[0],
+            σ_Q[0],
+            M_T,
+            Σ_T,
+            Q_subseq_isconstant[0],
+            T_subseq_isconstant,
+        )
+
+        if query_idx is not None:
+            distance_profile[query_idx] = 0
 
     return distance_profile
 
 
-def _mass_distance_matrix(Q, T, m, distance_matrix, μ_Q, σ_Q, M_T, Σ_T):
+def _mass_distance_matrix(
+    Q,
+    T,
+    m,
+    distance_matrix,
+    μ_Q,
+    σ_Q,
+    M_T,
+    Σ_T,
+    Q_subseq_isconstant,
+    T_subseq_isconstant,
+    query_idx=None,
+):
     """
     Compute the full distance matrix between all of the subsequences of `Q` and `T`
     using the MASS algorithm
@@ -1498,19 +1811,58 @@ def _mass_distance_matrix(Q, T, m, distance_matrix, μ_Q, σ_Q, M_T, Σ_T):
     Σ_T : numpy.ndarray
         Sliding standard deviation of `T`
 
+    Q_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether the subsequence in `Q` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
+    query_idx : int, default None
+        This is the index position along the time series, `T`, where the query
+        subsequence, `Q`, is located. `query_idx` should be set to None if `Q`
+        is not a subsequence of `T`. If `Q` is a subsequence of `T`, provding
+        this argument is optional. If provided, the precision of computation
+        can be slightly improved.
+
     Returns
     -------
         None
     """
+    if query_idx is not None:
+        query_idx = int(query_idx)
+
     for i in range(distance_matrix.shape[0]):
         if np.any(~np.isfinite(Q[i : i + m])):  # pragma: no cover
             distance_matrix[i, :] = np.inf
         else:
             QT = _sliding_dot_product(Q[i : i + m], T)
-            distance_matrix[i, :] = _mass(Q[i : i + m], T, QT, μ_Q[i], σ_Q[i], M_T, Σ_T)
+            distance_matrix[i, :] = _mass(
+                Q[i : i + m],
+                T,
+                QT,
+                μ_Q[i],
+                σ_Q[i],
+                M_T,
+                Σ_T,
+                Q_subseq_isconstant[i],
+                T_subseq_isconstant,
+            )
+
+            # this is to fix slight loss-of-precision
+            if query_idx is not None:
+                distance_matrix[i, query_idx + i] = 0.0
 
 
-def mass_distance_matrix(Q, T, m, distance_matrix, M_T=None, Σ_T=None):
+def mass_distance_matrix(
+    Q,
+    T,
+    m,
+    distance_matrix,
+    M_T=None,
+    Σ_T=None,
+    T_subseq_isconstant=None,
+    Q_subseq_isconstant=None,
+):
     """
     Compute the full distance matrix between all of the subsequences of `Q` and `T`
     using the MASS algorithm
@@ -1535,18 +1887,57 @@ def mass_distance_matrix(Q, T, m, distance_matrix, M_T=None, Σ_T=None):
     Σ_T : numpy.ndarray, default None
         Sliding standard deviation of `T`
 
+    T_subseq_isconstant : numpy.ndarray, function, default None
+        A boolean array that indicates whether a subsequence in `T` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    Q_subseq_isconstant : numpy.ndarray, function, default None
+        A boolean array that indicates whether the subsequence in `Q` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether the subsequence in `Q` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
     Returns
     -------
         None
     """
-    Q, μ_Q, σ_Q = preprocess(Q, m)
+    Q, μ_Q, σ_Q, Q_subseq_isconstant = preprocess(
+        T=Q, m=m, copy=True, T_subseq_isconstant=Q_subseq_isconstant
+    )
 
-    if M_T is None or Σ_T is None:
-        T, M_T, Σ_T = preprocess(T, m)
+    T, M_T, Σ_T, T_subseq_isconstant = preprocess(
+        T,
+        m,
+        copy=True,
+        M_T=M_T,
+        Σ_T=Σ_T,
+        T_subseq_isconstant=T_subseq_isconstant,
+    )
 
     check_window_size(m, max_size=min(Q.shape[-1], T.shape[-1]))
 
-    return _mass_distance_matrix(Q, T, m, distance_matrix, μ_Q, σ_Q, M_T, Σ_T)
+    return _mass_distance_matrix(
+        Q,
+        T,
+        m,
+        distance_matrix,
+        μ_Q,
+        σ_Q,
+        M_T,
+        Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
+    )
 
 
 def _get_QT(start, T_A, T_B, m):
@@ -1609,6 +2000,10 @@ def _apply_exclusion_zone(a, idx, excl_zone, val):
 
     val : float or bool
         The elements within the exclusion zone will be set to this value
+
+    Returns
+    -------
+    None
     """
     zone_start = max(0, idx - excl_zone)
     zone_stop = min(a.shape[-1], idx + excl_zone)
@@ -1637,27 +2032,36 @@ def apply_exclusion_zone(a, idx, excl_zone, val):
 
     val : float or bool
         The elements within the exclusion zone will be set to this value
+
+    Returns
+    -------
+    None
     """
     check_dtype(a, dtype=type(val))
     _apply_exclusion_zone(a, idx, excl_zone, val)
 
 
-def _preprocess(T):
+def _preprocess(T, copy=True):
     """
-    Creates a copy of the time series, transposes all dataframes, converts to
-    `numpy.ndarray`, and checks the `dtype`
+    Creates a copy of the time series when `copy` is True, transposes all dataframes,
+    converts to `numpy.ndarray`, and checks the `dtype`
 
     Parameters
     ----------
     T : numpy.ndarray
         Time series or sequence
 
+    copy : bool, default True
+        A boolean value that indicates whether the process should be done on
+        input `T` (False) or its copy (True).
+
     Returns
     -------
     T : numpy.ndarray
         Modified time series
     """
-    T = T.copy()
+    if copy:
+        T = T.copy()
     T = transpose_dataframe(T)
     T = np.asarray(T)
     check_dtype(T)
@@ -1665,14 +2069,24 @@ def _preprocess(T):
     return T
 
 
-def preprocess(T, m):
+def preprocess(
+    T,
+    m,
+    copy=True,
+    M_T=None,
+    Σ_T=None,
+    T_subseq_isconstant=None,
+):
     """
     Creates a copy of the time series where all NaN and inf values
     are replaced with zero. Also computes mean and standard deviation
     for every subsequence. Every subsequence that contains at least
     one NaN or inf value, will have a mean of np.inf. For the standard
     deviation these values are ignored. If all values are illegal, the
-    standard deviation will be 0 (see `core.compute_mean_std`)
+    standard deviation will be 0 (see `core.compute_mean_std`). Also,
+    compute the rolling isconstant, a boolean array that indicates if
+    a subsequence is constant (True) or False. A subsequence is constant
+    if it contains finite values that are identical.
 
     Parameters
     ----------
@@ -1682,6 +2096,26 @@ def preprocess(T, m):
     m : int
         Window size
 
+    copy : bool, default True
+        A boolean value that indicates whether the process should be done on
+        input `T` (False) or its copy (True).
+
+    M_T : numpy.ndarray, default None
+        Rolling mean
+
+    Σ_T : numpy.ndarray, default None
+        Rolling standard deviation
+
+    T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
     Returns
     -------
     T : numpy.ndarray
@@ -1690,14 +2124,21 @@ def preprocess(T, m):
         Rolling mean
     Σ_T : numpy.ndarray
         Rolling standard deviation
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T`
+        is constant (True)
     """
-    T = _preprocess(T)
+    T = _preprocess(T, copy)
     check_window_size(m, max_size=T.shape[-1])
+
     T[np.isinf(T)] = np.nan
-    M_T, Σ_T = compute_mean_std(T, m)
+
+    T_subseq_isconstant = process_isconstant(T, m, T_subseq_isconstant)
+    if M_T is None or Σ_T is None:
+        M_T, Σ_T = compute_mean_std(T, m)
     T[np.isnan(T)] = 0
 
-    return T, M_T, Σ_T
+    return T, M_T, Σ_T, T_subseq_isconstant
 
 
 def preprocess_non_normalized(T, m):
@@ -1730,12 +2171,13 @@ def preprocess_non_normalized(T, m):
     T = _preprocess(T)
     check_window_size(m, max_size=T.shape[-1])
     T_subseq_isfinite = rolling_isfinite(T, m)
-    T[~np.isfinite(T)] = 0.0
+    T[~np.isfinite(T)] = np.nan
+    T[np.isnan(T)] = 0
 
     return T, T_subseq_isfinite
 
 
-def preprocess_diagonal(T, m):
+def preprocess_diagonal(T, m, T_subseq_isconstant=None):
     """
     Preprocess a time series that is to be used when traversing the diagonals of a
     distance matrix.
@@ -1758,6 +2200,16 @@ def preprocess_diagonal(T, m):
     m : int
         Window size
 
+    T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
     Returns
     -------
     T : numpy.ndarray
@@ -1779,9 +2231,14 @@ def preprocess_diagonal(T, m):
     T_subseq_isconstant : numpy.ndarray
         A boolean array that indicates whether a subsequence in `T` is constant (True)
     """
-    T, T_subseq_isfinite = preprocess_non_normalized(T, m)
+    T = _preprocess(T)
+    check_window_size(m, max_size=T.shape[-1])
+    T_subseq_isfinite = rolling_isfinite(T, m)
+    T[~np.isfinite(T)] = np.nan
+    T_subseq_isconstant = process_isconstant(T, m, T_subseq_isconstant)
+    T[np.isnan(T)] = 0
+
     M_T, Σ_T = compute_mean_std(T, m)
-    T_subseq_isconstant = Σ_T < config.STUMPY_STDDEV_THRESHOLD
     Σ_T[T_subseq_isconstant] = 1.0  # Avoid divide by zero in next inversion step
     Σ_T_inverse = 1.0 / Σ_T
     M_T_m_1, _ = compute_mean_std(T, m - 1)
@@ -1807,8 +2264,8 @@ def replace_distance(D, search_val, replace_val, epsilon=0.0):
     epsilon : float, default 0.0
         Threshold below `search_val` in which to still allow for a replacement
 
-    Return
-    ------
+    Returns
+    -------
     None
     """
     D[D == search_val - epsilon] = replace_val
@@ -1933,7 +2390,7 @@ def _get_ranges(size, n_chunks, truncate):
     This function is different from `_get_array_ranges` in that it does not take into
     account the contents of the array and, instead, assumes that we are chunking up
     `np.ones(size, dtype=np.int64)`. Additionally, the non-truncated sections may not
-    all appear at the end of the returned away (i.e., they may be scattered throughout
+    all appear at the end of the returned array (i.e., they may be scattered throughout
     different rows of the array) but may be identified as having the same start and
     stop indices.
 
@@ -1986,8 +2443,8 @@ def _rolling_isfinite_1d(a, w):
     w : int
         The length of the rolling window
 
-    Return
-    ------
+    Returns
+    -------
     output : numpy.ndarray
         A boolean array of length `a.shape[0] - w + 1` that records whether each
         rolling window subsequence contain all finite values
@@ -2034,7 +2491,162 @@ def rolling_isfinite(a, w):
     )
 
 
-def _get_partial_mp_func(mp_func, dask_client=None, device_id=None):
+@njit(parallel=True, fastmath={"nsz", "arcp", "contract", "afn", "reassoc"})
+def _rolling_isconstant(a, w):
+    """
+    Compute the rolling isconstant for 1-D array.
+
+    This is accomplished by comparing the min and max within each window and
+    assigning `True` when the min and max are equal and `False` otherwise. If
+    a subsequence contains at least one NaN, then the subsequence is not constant.
+
+    Parameters
+    ----------
+    a : numpy.ndarray
+        The input array
+
+    w : numpy.ndarray
+        The rolling window size
+
+    Returns
+    -------
+    output : numpy.ndarray
+        Rolling window isconstant.
+    """
+    l = a.shape[0] - w + 1
+    out = np.empty(l)
+    for i in prange(l):
+        out[i] = np.ptp(a[i : i + w])
+
+    return out == 0
+
+
+def rolling_isconstant(a, w, a_subseq_isconstant=None):
+    """
+    Compute the rolling isconstant for 1-D and 2-D arrays.
+
+    This is accomplished by comparing the min and max within each window and
+    assigning `True` when the min and max are equal and `False` otherwise. If
+    a subsequence contains at least one NaN, then the subsequence is not constant.
+
+    Parameters
+    ----------
+    a : numpy.ndarray
+        The input array
+
+    w : numpy.ndarray
+        The rolling window size
+
+    a_subseq_isconstant : np.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `a` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `a` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. When
+        None, this defaults to `_rolling_isconstant`.
+
+    Returns
+    -------
+    a_subseq_isconstant : numpy.ndarray
+        Rolling window isconstant
+    """
+    if a_subseq_isconstant is None:
+        a_subseq_isconstant = _rolling_isconstant
+
+    isconstant_func = None
+    if callable(a_subseq_isconstant):
+        incomp_args = _find_incompatible_args(a_subseq_isconstant, ["a", "w"])
+        if len(incomp_args) > 0:  # pragma: no cover
+            msg = (
+                f"Incompatible arguments {incomp_args} found in `T_subseq_isconstant`. "
+                + "Please provide the custom function `T_subseq_isconstant` with "
+                + "arguments `a`, a 1-D array, and `w`, the window size."
+            )
+            raise ValueError(msg)
+
+        isconstant_func = a_subseq_isconstant
+
+    elif isinstance(a_subseq_isconstant, np.ndarray):
+        isconstant_func = None
+        if a.ndim != a_subseq_isconstant.ndim:  # pragma: no cover
+            msg = (
+                "The arrays `a` and `a_subseq_isconstant` must have same "
+                + "number of dimensions, {a.ndim} != {a_subseq_isconstant.ndim}"
+            )
+            raise ValueError(msg)
+
+    else:  # pragma: no cover
+        msg = (
+            "`T_subseq_isconstant` must be of type `np.ndarray` or a callable "
+            + f"function. Found {type(a_subseq_isconstant)} instead."
+        )
+        raise ValueError(msg)
+
+    if isconstant_func is not None:
+        axis = a.ndim - 1
+        a_subseq_isconstant = np.apply_along_axis(
+            lambda a_row, w: isconstant_func(a_row, w), axis=axis, arr=a, w=w
+        )
+
+    if not issubclass(a_subseq_isconstant.dtype.type, np.bool_):  # pragma: no cover
+        msg = (
+            f"The output dtype of `T_subseq_isconstant` is {a_subseq_isconstant.dtype} "
+            + "but dtype `np.bool` was expected"
+        )
+        raise ValueError(msg)
+
+    return a_subseq_isconstant
+
+
+def fix_isconstant_isfinite_conflicts(
+    T, m, T_subseq_isconstant, T_subseq_isfinite=None
+):
+    """
+    Fix `T_subseq_isconstant` by setting its element to False if their
+    corresponding value in `T_subseq_isfinite` is False.
+
+    Parameters
+    ----------
+    T : numpy.ndarray
+        Time series
+
+    m : int
+        Subsequence window size
+
+    T_subseq_isconstant : numpy.ndarray
+        A numpy array `dtype` of boolean that indicates whether a subsequence
+        is constant (True)  or not (False).
+
+    T_subseq_isfinite : numpy.ndarray, default None
+        A boolean array that indicates whether a subsequence in `T` contains a
+        `np.nan`/`np.inf` value (False)
+
+    Returns
+    -------
+    fixed : numpy.ndarray
+        The same as input `T_subseq_isconstant` but with indices set to False
+        if their corresponding subsequence are not finite.
+    """
+    if T_subseq_isfinite is None:
+        T_subseq_isfinite = rolling_isfinite(T, m)
+
+    fixed = np.logical_and(T_subseq_isconstant, T_subseq_isfinite)
+
+    conflicts = fixed != T_subseq_isconstant
+    if np.any(conflicts):  # pragma: no cover
+        msg = (
+            f"Subsequences located at indices {np.nonzero(conflicts)} contain one "
+            + "or more np.nan/np.inf and so their corresponding values in "
+            + "`T_subseq_isconstant` have been automatically switched from True "
+            + " to False."
+        )
+        warnings.warn(msg)
+
+    return fixed
+
+
+def _get_partial_mp_func(mp_func, client=None, device_id=None):
     """
     A convenience function for creating a `functools.partial` matrix profile function
     for single server (parallel CPU), multi-server with Dask distributed (parallel CPU),
@@ -2042,13 +2654,12 @@ def _get_partial_mp_func(mp_func, dask_client=None, device_id=None):
 
     Parameters
     ----------
-    mp_func : object
+    mp_func : function
         The matrix profile function to be used for computing a matrix profile
 
-    dask_client : client, default None
-        A Dask Distributed client that is connected to a Dask scheduler and
-        Dask workers. Setting up a Dask distributed cluster is beyond the
-        scope of this library. Please refer to the Dask Distributed
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
         documentation.
 
     device_id : int or list, default None
@@ -2059,14 +2670,16 @@ def _get_partial_mp_func(mp_func, dask_client=None, device_id=None):
 
     Returns
     -------
-    partial_mp_func : object
-        A generic matrix profile function that wraps the `dask_client` or GPU
-        `device_id` into `functools.partial` function where possible
+    partial_mp_func : functools.partial
+        A generic matrix profile function that wraps the distributed `client` or GPU
+        `device_id` into `functools.partial` function
     """
-    if dask_client is not None:
-        partial_mp_func = functools.partial(mp_func, dask_client)
+    if client is not None:
+        partial_mp_func = functools.partial(mp_func, client)
     elif device_id is not None:
         partial_mp_func = functools.partial(mp_func, device_id=device_id)
+    elif isinstance(mp_func, functools.partial):
+        partial_mp_func = functools.partial(mp_func)
     else:
         partial_mp_func = mp_func
 
@@ -2094,8 +2707,8 @@ def _jagged_list_to_array(a, fill_value, dtype):
     dtype : dtype
         The desired data-type for the array.
 
-    Return
-    ------
+    Returns
+    -------
     out : numpy.ndarray
         The resulting array of dtype `dtype`.
     """
@@ -2141,7 +2754,9 @@ def _get_mask_slices(mask):
     return slices
 
 
-def _idx_to_mp(I, T, m, normalize=True):
+def _idx_to_mp(
+    I, T, m, normalize=True, p=2.0, T_subseq_isconstant=None, check_neg=True
+):
     """
     Convert a set of matrix profile indices (including left and right indices) to its
     corresponding matrix profile distances
@@ -2160,6 +2775,17 @@ def _idx_to_mp(I, T, m, normalize=True):
     normalize : bool, default True
         When set to `True`, this z-normalizes subsequences prior to computing distances
 
+    p : float, default 2.0
+        The p-norm to apply for computing the Minkowski distance. This parameter is
+        ignored when `normalize == True`.
+
+    T_subseq_isconstant : bool, default None
+        A boolean value that indicates whether the ith subsequence in `T` is
+        constant (True). When `None`, it is computed by `rolling_isconstant`
+
+    check_neg : bool, default True
+        Check for the existence of negative indices
+
     Returns
     -------
     P : numpy.ndarray
@@ -2167,17 +2793,36 @@ def _idx_to_mp(I, T, m, normalize=True):
     """
     I = I.astype(np.int64)
     T = T.copy()
+
+    if check_neg:
+        neg_idx = np.where(I < 0)[0]
+        if neg_idx.size > 0:  # pragma: no cover
+            msg = f"A negative index value ({I[neg_idx[0]]}) was found "
+            msg += f"at I[{neg_idx[0]}] where a positive index value was "
+            msg += "expected (i.e., a negative index is considered null)."
+            warnings.warn(msg)
+
+    if normalize:
+        T_subseq_isconstant = process_isconstant(T, m, T_subseq_isconstant)
+
     T_isfinite = np.isfinite(T)
-    T_subseqs_isfinite = np.all(rolling_window(T_isfinite, m), axis=1)
+    T_subseq_isfinite = np.all(rolling_window(T_isfinite, m), axis=1)
 
     T[~T_isfinite] = 0.0
     T_subseqs = rolling_window(T, m)
     nn_subseqs = T_subseqs[I]
     if normalize:
         P = linalg.norm(z_norm(T_subseqs, axis=1) - z_norm(nn_subseqs, axis=1), axis=1)
+        nn_subseq_isconstant = T_subseq_isconstant[I]
+        P[
+            T_subseq_isconstant & nn_subseq_isconstant
+        ] = 0  # both subsequences are constant
+        P[np.logical_xor(T_subseq_isconstant, nn_subseq_isconstant)] = np.sqrt(
+            m
+        )  # only one subsequence is constant
     else:
-        P = linalg.norm(T_subseqs - nn_subseqs, axis=1)
-    P[~T_subseqs_isfinite] = np.inf
+        P = linalg.norm(T_subseqs - nn_subseqs, axis=1, ord=p)
+    P[~T_subseq_isfinite] = np.inf
     P[I < 0] = np.inf
 
     return P
@@ -2231,7 +2876,6 @@ def _total_diagonal_ndists(tile_lower_diag, tile_upper_diag, tile_height, tile_w
         or tile_lower_diag > max_tile_diag
         or tile_upper_diag > max_tile_diag
     ):
-
         return 0
 
     if tile_lower_diag == min_tile_diag and tile_upper_diag == max_tile_diag:
@@ -2563,7 +3207,7 @@ def _select_P_ABBA_value(P_ABBA, k, custom_func=None):
         Specify the `k`th value in the concatenated matrix profiles to return. This
         parameter is ignored when `custom_func` is not None.
 
-    custom_func : object, default None
+    custom_func : function, default None
         A custom user defined function for selecting the desired value from the
         unsorted `P_ABBA` array. This function may need to leverage `functools.partial`
         and should take `P_ABBA` as its only input parameter and return a single
@@ -2589,7 +3233,7 @@ def _select_P_ABBA_value(P_ABBA, k, custom_func=None):
     return MPdist
 
 
-@njit
+@njit()
 def _merge_topk_PI(PA, PB, IA, IB):
     """
     Merge two top-k matrix profiles `PA` and `PB`, and update `PA` (in place).
@@ -2662,7 +3306,7 @@ def _merge_topk_PI(PA, PB, IA, IB):
             IA[i] = tmp_I
 
 
-@njit
+@njit()
 def _merge_topk_ρI(ρA, ρB, IA, IB):
     """
     Merge two top-k pearson profiles `ρA` and `ρB`, and update `ρA` (in place).
@@ -2736,7 +3380,7 @@ def _merge_topk_ρI(ρA, ρB, IA, IB):
             IA[i] = tmp_I
 
 
-@njit
+@njit()
 def _shift_insert_at_index(a, idx, v, shift="right"):
     """
     If `shift=right` (default), all elements in `a[idx:]` are shifted to the right by
@@ -2750,19 +3394,19 @@ def _shift_insert_at_index(a, idx, v, shift="right"):
 
     Parameters
     ----------
-    a: numpy.ndarray
+    a : numpy.ndarray
         A 1d array
 
-    idx: int
+    idx : int
         The index at which the value `v` should be inserted. This can be any
         integer number from `0` to `len(a)`. When `idx=len(a)` and `shift="right"`,
         OR when `idx=0` and `shift="left"`, then no change will occur on
         the input array `a`.
 
-    v: float
+    v : float
         The value that should be inserted into array `a` at index `idx`
 
-    shift: str, default "right"
+    shift : str, default "right"
         The value that indicates whether the shifting of elements should be towards
         the right or left. If `shift="right"` (default), all elements in `a[idx:]`
         are shifted to the right by one element. If `shift="left"`, all elements
@@ -2804,8 +3448,9 @@ def _check_P(P, threshold=1e-6):
     if P.ndim != 1:
         raise ValueError("`P` was {P.ndim}-dimensional and must be 1-dimensional")
     if are_distances_too_small(P, threshold=threshold):  # pragma: no cover
-        logger.warning(f"A large number of values in `P` are smaller than {threshold}.")
-        logger.warning("For a self-join, try setting `ignore_trivial=True`.")
+        msg = f"A large number of values in `P` are smaller than {threshold}.\n"
+        msg += "For a self-join, try setting `ignore_trivial=True`."
+        warnings.warn(msg)
 
 
 def _find_matches(
@@ -2898,3 +3543,735 @@ def _find_matches(
         candidate_idx = np.argmin(D)
 
     return np.array(matches, dtype=object)
+
+
+@cuda.jit(device=True)
+def _gpu_searchsorted_left(a, v, bfs, nlevel):
+    """
+    A device function, equivalent to numpy.searchsorted(a, v, side='left')
+
+    Parameters
+    ----------
+    a : numpy.ndarray
+        1-dim array sorted in ascending order.
+
+    v : float
+        Value to insert into array `a`
+
+    bfs : numpy.ndarray
+        The breadth-first-search indices where the missing leaves of its corresponding
+        binary search tree are filled with -1.
+
+    nlevel : int
+        The number of levels in the binary search tree from which the array
+        `bfs` is obtained.
+
+    Returns
+    -------
+    idx : int
+        The index of the insertion point
+    """
+    n = a.shape[0]
+    idx = 0
+    for level in range(nlevel):
+        if v <= a[bfs[idx]]:
+            next_idx = 2 * idx + 1
+        else:
+            next_idx = 2 * idx + 2
+
+        if level == nlevel - 1 or bfs[next_idx] < 0:
+            if v <= a[bfs[idx]]:
+                idx = max(bfs[idx], 0)
+            else:
+                idx = min(bfs[idx] + 1, n)
+            break
+        idx = next_idx
+
+    return idx
+
+
+@cuda.jit(device=True)
+def _gpu_searchsorted_right(a, v, bfs, nlevel):
+    """
+    A device function, equivalent to numpy.searchsorted(a, v, side='right')
+
+    Parameters
+    ----------
+    a : numpy.ndarray
+        1-dim array sorted in ascending order.
+
+    v : float
+        Value to insert into array `a`
+
+    bfs : numpy.ndarray
+        The breadth-first-search indices where the missing leaves of its corresponding
+        binary search tree are filled with -1.
+
+    nlevel : int
+        The number of levels in the binary search tree from which the array
+        `bfs` is obtained.
+
+    Returns
+    -------
+    idx : int
+        The index of the insertion point
+    """
+    n = a.shape[0]
+    idx = 0
+    for level in range(nlevel):
+        if v < a[bfs[idx]]:
+            next_idx = 2 * idx + 1
+        else:
+            next_idx = 2 * idx + 2
+
+        if level == nlevel - 1 or bfs[next_idx] < 0:
+            if v < a[bfs[idx]]:
+                idx = max(bfs[idx], 0)
+            else:
+                idx = min(bfs[idx] + 1, n)
+            break
+        idx = next_idx
+
+    return idx
+
+
+def check_ignore_trivial(T_A, T_B, ignore_trivial):
+    """
+    Check inputs and verify the appropriateness for self-joins vs AB-joins and
+    provides relevant warnings.
+
+    Note that the warnings will output the first occurrence of matching warnings
+    for each location (module + line number) where the warning is issued
+
+    Parameters
+    ----------
+    T_A : numpy.ndarray
+        The time series or sequence for which to compute the matrix profile
+
+    T_B : numpy.ndarray
+        The time series or sequence that will be used to annotate T_A. For every
+        subsequence in T_A, its nearest neighbor in T_B will be recorded. Default is
+        `None` which corresponds to a self-join.
+
+    ignore_trivial : bool
+        Set to `True` if this is a self-join. Otherwise, for AB-join, set this
+        to `False`.
+
+    Returns
+    -------
+    ignore_trivial : bool
+        The (corrected) ignore_trivial value
+
+    Notes
+    -----
+    These warnings may be supresse by using a context manager
+    ```
+    import stumpy
+    import numpy as np
+    import warnings
+
+    T = np.random.rand(10_000)
+    m = 50
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Arrays T_A, T_B are equal")
+        for _ in range(5):
+            stumpy.stump(T, m, T, ignore_trivial=False)
+    ```
+    """
+    if ignore_trivial is False and are_arrays_equal(T_A, T_B):  # pragma: no cover
+        msg = "Arrays T_A, T_B are equal, which implies a self-join. "
+        msg += "Try setting `ignore_trivial = True`."
+        warnings.warn(msg)
+
+    if ignore_trivial and are_arrays_equal(T_A, T_B) is False:  # pragma: no cover
+        msg = "Arrays T_A, T_B are not equal, which implies an AB-join. "
+        msg += "`ignore_trivial` has been automatically set to `False`."
+        warnings.warn(msg)
+        ignore_trivial = False
+
+    return ignore_trivial
+
+
+def _client_to_func(client):
+    """
+    Based on the client information and the parent function calling this
+    function, infer the name of the client function to return
+
+    For example, if the parent function calling `_client_to_func` is called
+    `stumped` and the `client` is a Dask client, then `_dask_` will be
+    prepended to the string `calling_func` and the resulting function
+    called `_dask_stumped` will be returned. For a Ray client, the function
+    caled `_ray_stumped` will be returned. Note that it is the responsibility
+    of the caller to ensure that the resulting derived function exists. Otherwise,
+    this will likely result in a `ModuleNotFoundError`.
+
+    Parameters
+    ----------
+    client : client
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
+        documentation.
+
+    Returns
+    -------
+    func : function
+        The correct function for a client
+    """
+    if client.__class__.__name__.startswith("Client"):
+        prefix = "_dask_"
+    # elif inspect.ismodule(client) and str(client).startswith(
+    #     "<module 'ray'"
+    # ):  # pragma: no cover
+    #     prefix = "_ray_"
+    else:
+        msg = f"Distributed client `{client}` is unrecognized or "
+        msg += "has yet to be implemented"
+        raise NotImplementedError(msg)
+
+    calling_func = inspect.stack()[1].function
+    module = __import__(
+        calling_func,
+        globals(),
+        locals(),
+        level=1,
+        fromlist=[prefix + calling_func],
+    )
+    func = getattr(module, prefix + calling_func)
+
+    return func
+
+
+def _find_incompatible_args(func, required_args):
+    """
+    For a given `func` and `requried_args`, return non-default
+    arguments in `func` that are not in `required_args`
+
+    Parameters
+    ----------
+    func : function
+        A function
+
+    required_args : list
+        A list containing the name of required arguments.
+
+    Returns
+    -------
+    out : set
+        A set of non-default arguments in `func` which are not in
+        required_args
+    """
+    if not isinstance(required_args, list):  # pragma: no cover
+        required_args = list(required_args)
+
+    non_default_args = []
+    for arg_name, arg in inspect.signature(func).parameters.items():
+        # inspect.signature(functools.partial(func)) returns all arguments
+        # including the ones with default values. the following if block
+        # is to find non-default arguments.
+        if arg.default == inspect.Parameter.empty:
+            non_default_args.append(arg_name)
+
+    return set(non_default_args).difference(set(required_args))
+
+
+def _preprocess_include(include):
+    """
+    A utility function for processing the `include` input
+
+    Parameters
+    ----------
+    include : numpy.ndarray
+        A list of (zero-based) indices corresponding to the dimensions in `T` that
+        must be included in the constrained multidimensional motif search.
+        For more information, see Section IV D in:
+
+        `DOI: 10.1109/ICDM.2017.66 \
+        <https://www.cs.ucr.edu/~eamonn/Motif_Discovery_ICDM.pdf>`__
+
+    Returns
+    -------
+    include : numpy.ndarray
+        Process `include` and remove any redundant index values
+    """
+    include = np.asarray(include)
+    _, idx = np.unique(include, return_index=True)
+    if include.shape[0] != idx.shape[0]:  # pragma: no cover
+        warnings.warn("Removed repeating indices in `include`")
+        include = include[np.sort(idx)]
+
+    return include
+
+
+def _apply_include(
+    D,
+    include,
+    restricted_indices=None,
+    unrestricted_indices=None,
+    mask=None,
+    tmp_swap=None,
+):
+    """
+    Apply a transformation to the multi-dimensional distance profile so that specific
+    dimensions are always included. Essentially, it is swapping rows within the distance
+    profile.
+
+    Parameters
+    ----------
+    D : numpy.ndarray
+        The multi-dimensional distance profile
+
+    include : numpy.ndarray
+        A list of (zero-based) indices corresponding to the dimensions in `T` that
+        must be included in the constrained multidimensional motif search.
+        For more information, see Section IV D in:
+
+        `DOI: 10.1109/ICDM.2017.66 \
+        <https://www.cs.ucr.edu/~eamonn/Motif_Discovery_ICDM.pdf>`__
+
+    restricted_indices : numpy.ndarray, default None
+        A list of indices specified in `include` that reside in the first
+        `include.shape[0]` rows
+
+    unrestricted_indices : numpy.ndarray, default None
+        A list of indices specified in `include` that do not reside in the first
+        `include.shape[0]` rows
+
+    mask : numpy.ndarray, default None
+        A boolean mask to select for unrestricted indices
+
+    tmp_swap : numpy.ndarray, default None
+        A reusable array to aid in array element swapping
+
+    Returns
+    -------
+    None
+    """
+    include = _preprocess_include(include)
+
+    if restricted_indices is None:
+        restricted_indices = include[include < include.shape[0]]
+
+    if unrestricted_indices is None:
+        unrestricted_indices = include[include >= include.shape[0]]
+
+    if mask is None:
+        mask = np.ones(include.shape[0], dtype=bool)
+        mask[restricted_indices] = False
+
+    if tmp_swap is None:
+        tmp_swap = D[: include.shape[0]].copy()
+    else:
+        tmp_swap[:] = D[: include.shape[0]]
+
+    D[: include.shape[0]] = D[include]
+    D[unrestricted_indices] = tmp_swap[mask]
+
+
+def _subspace(D, k, include=None, discords=False):
+    """
+    Compute the k-dimensional matrix profile subspace for a given subsequence index and
+    its nearest neighbor index
+
+    Parameters
+    ----------
+    D : numpy.ndarray
+        The multi-dimensional distance profile
+
+    k : int
+        The subset number of dimensions out of `D = T.shape[0]`-dimensions to return
+        the subspace for. Note that zero-based indexing is used.
+
+    include : numpy.ndarray, default None
+        A list of (zero-based) indices corresponding to the dimensions in `T` that
+        must be included in the constrained multidimensional motif search.
+        For more information, see Section IV D in:
+
+        `DOI: 10.1109/ICDM.2017.66 \
+        <https://www.cs.ucr.edu/~eamonn/Motif_Discovery_ICDM.pdf>`__
+
+    discords : bool, default False
+        When set to `True`, this reverses the distance profile to favor discords rather
+        than motifs. Note that indices in `include` are still maintained and respected.
+
+    Returns
+    -------
+        S : numpy.ndarray
+        An array that contains the `k`th-dimensional subspace for the subsequence. Note
+        that `k+1` rows will be returned.
+    """
+    if discords:
+        sorted_idx = D[::-1].argsort(axis=0, kind="mergesort")
+    else:
+        sorted_idx = D.argsort(axis=0, kind="mergesort")
+
+    # `include` processing occur here since we are dealing with indices, not distances
+    if include is not None:
+        include = _preprocess_include(include)
+        mask = np.in1d(sorted_idx, include)
+        include_idx = mask.nonzero()[0]
+        exclude_idx = (~mask).nonzero()[0]
+        sorted_idx[: include_idx.shape[0]], sorted_idx[include_idx.shape[0] :] = (
+            sorted_idx[include_idx],
+            sorted_idx[exclude_idx],
+        )
+
+    S = sorted_idx[: k + 1]
+
+    return S
+
+
+def _mdl(disc_subseqs, disc_neighbors, S, n_bit=8):
+    """
+    Compute the number of bits needed to compress one array with another
+    using the minimum description length (MDL)
+
+    Parameters
+    ----------
+    disc_subseqs : numpy.ndarray
+        The discretized array to be compressed
+
+    disc_neighbors : numpy.ndarray
+        The discretized array that will be used as a hypothesis for compression
+
+    S : numpy.ndarray
+        An array that contains the `k`th-dimensional subspace to be used
+
+    n_bit : int, default 8
+        The number of bits to use for computing the bit size
+
+    Returns
+    -------
+    bit_size : float
+        The total number of bits computed from MDL for representing both input arrays
+    """
+    ndim = disc_subseqs.shape[0]
+    sub_dims, m = disc_subseqs[S].shape
+
+    n_val = len(np.unique(disc_subseqs[S] - disc_neighbors[S]))
+    bit_size = n_bit * (2 * ndim * m - sub_dims * m)
+    bit_size = bit_size + sub_dims * m * np.log2(n_val) + n_val * n_bit
+
+    return bit_size
+
+
+@njit(
+    # "(i8, i8, f8[:, :], f8[:], i8, f8[:, :], i8[:, :], f8)",
+    fastmath={"nsz", "arcp", "contract", "afn", "reassoc"},
+)
+def _compute_multi_PI(d, idx, D, D_prime, range_start, P, I, p=2.0):
+    """
+    A Numba JIT-compiled version of mSTOMP for updating the matrix profile and matrix
+    profile indices
+
+    Parameters
+    ----------
+    d : int
+        The total number of dimensions in `T`
+
+    idx : int
+        The subsequence index for the i-th time series, `T[i]`
+
+    D : numpy.ndarray
+        The distance profile
+
+    D_prime : numpy.ndarray
+        A reusable array for storing the column-wise cumulative sum of `D`
+
+    range_start : int
+        The starting index value along `T` for which to start the matrix
+        profile calculation
+
+    P : numpy.ndarray
+        The matrix profile
+
+    I : numpy.ndarray
+        The matrix profile indices
+
+    p : float, default 2.0
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
+
+    Returns
+    -------
+    None
+    """
+    D_prime[:] = 0.0
+    for i in range(d):
+        D_prime[:] = D_prime + np.power(D[i], 1.0 / p)
+
+        min_index = np.argmin(D_prime)
+        pos = idx - range_start
+        I[i, pos] = min_index
+        P[i, pos] = D_prime[min_index] / (i + 1)
+        if np.isinf(P[i, pos]):  # pragma nocover
+            I[i, pos] = -1
+
+
+def _compute_P_ABBA(
+    T_A,
+    T_B,
+    m,
+    P_ABBA,
+    partial_mp_func,
+    client=None,
+    device_id=None,
+):
+    """
+    A convenience function for computing the (unsorted) concatenated matrix profiles
+    from an AB-join and BA-join for the two time series, `T_A` and `T_B`. This result
+    can then be used to compute the matrix profile distance (MPdist) measure.
+
+    The MPdist distance measure considers two time series to be similar if they share
+    many subsequences, regardless of the order of matching subsequences. MPdist
+    concatenates the output of an AB-join and a BA-join and returns the `k`th smallest
+    value as the reported distance. Note that MPdist is a measure and not a metric.
+    Therefore, it does not obey the triangular inequality but the method is highly
+    scalable.
+
+    Parameters
+    ----------
+    T_A : numpy.ndarray
+        The first time series or sequence for which to compute the matrix profile
+
+    T_B : numpy.ndarray
+        The second time series or sequence for which to compute the matrix profile
+
+    m : int
+        Window size
+
+    P_ABBA : numpy.ndarray
+        The output array to write the concatenated AB-join and BA-join results to
+
+    partial_mp_func : functools.partial
+        A generic matrix profile function that wraps extra parameters into
+        `functools.partial` function
+
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
+        documentation.
+
+    device_id : int or list, default None
+        The (GPU) device number to use. The default value is `0`. A list of
+        valid device ids (int) may also be provided for parallel GPU-STUMP
+        computation. A list of all valid device ids can be obtained by
+        executing `[device.id for device in numba.cuda.list_devices()]`.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    `DOI: 10.1109/ICDM.2018.00119 \
+    <https://www.cs.ucr.edu/~eamonn/MPdist_Expanded.pdf>`__
+
+    See Section III
+    """
+    partial_mp_func = _get_partial_mp_func(
+        partial_mp_func, client=client, device_id=device_id
+    )
+
+    n_A = T_A.shape[0]
+    if inspect.signature(partial_mp_func).parameters.get("normalize") is not None:
+        # Normalized (stump-like)
+        # Only normalized mp funcs can have a "normalize" parameter in its function
+        # signature
+        params = partial_mp_func.keywords
+        T_A_subseq_isconstant = params.get("T_A_subseq_isconstant")
+        T_B_subseq_isconstant = params.get("T_B_subseq_isconstant")
+        P_ABBA[: n_A - m + 1] = partial_mp_func(
+            T_A,
+            m,
+            T_B,
+            ignore_trivial=False,
+            T_A_subseq_isconstant=T_A_subseq_isconstant,
+            T_B_subseq_isconstant=T_B_subseq_isconstant,
+        )[:, 0]
+        P_ABBA[n_A - m + 1 :] = partial_mp_func(
+            T_B,
+            m,
+            T_A,
+            ignore_trivial=False,
+            T_A_subseq_isconstant=T_B_subseq_isconstant,
+            T_B_subseq_isconstant=T_A_subseq_isconstant,
+        )[:, 0]
+    else:
+        # Non-normalized (aamp-like)
+        # Ignore/omit `T_A_subseq_isconstant` and `T_B_subseq_isconstant` parameters
+        # for all non-normalized mp funcs
+        P_ABBA[: n_A - m + 1] = partial_mp_func(T_A, m, T_B, ignore_trivial=False)[:, 0]
+        P_ABBA[n_A - m + 1 :] = partial_mp_func(T_B, m, T_A, ignore_trivial=False)[:, 0]
+
+
+def _mpdist(
+    T_A,
+    T_B,
+    m,
+    partial_mp_func,
+    percentage=0.05,
+    k=None,
+    client=None,
+    device_id=None,
+    custom_func=None,
+):
+    """
+    A convenience function for computing the matrix profile distance (MPdist) measure
+    between any two time series.
+
+    The MPdist distance measure considers two time series to be similar if they share
+    many subsequences, regardless of the order of matching subsequences. MPdist
+    concatenates the output of an AB-join and a BA-join and returns the `k`th smallest
+    value as the reported distance. Note that MPdist is a measure and not a metric.
+    Therefore, it does not obey the triangular inequality but the method is highly
+    scalable.
+
+    Parameters
+    ----------
+    T_A : numpy.ndarray
+        The first time series or sequence for which to compute the matrix profile
+
+    T_B : numpy.ndarray
+        The second time series or sequence for which to compute the matrix profile
+
+    m : int
+        Window size
+
+    partial_mp_func : functools.partial
+        A generic matrix profile function that wraps extra parameters into
+        `functools.partial` function.
+
+    percentage : float, 0.05
+       The percentage of distances that will be used to report `mpdist`. The value
+        is between 0.0 and 1.0. This parameter is ignored when `k` is not `None` or when
+        `k_func` is not None.
+
+    k : int, default None
+        Specify the `k`th value in the concatenated matrix profiles to return. When `k`
+        is not `None`, then the `percentage` parameter is ignored. This parameter is
+        ignored when `k_func` is not None.
+
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
+        documentation.
+
+    device_id : int or list, default None
+        The (GPU) device number to use. The default value is `0`. A list of
+        valid device ids (int) may also be provided for parallel GPU-STUMP
+        computation. A list of all valid device ids can be obtained by
+        executing `[device.id for device in numba.cuda.list_devices()]`.
+
+    custom_func : function, default None
+        A custom user defined function for selecting the desired value from the
+        unsorted `P_ABBA` array. This function may need to leverage `functools.partial`
+        and should take `P_ABBA` as its only input parameter and return a single
+        `MPdist` value. The `percentage` and `k` parameters are ignored when
+        `custom_func` is not None.
+
+    Returns
+    -------
+    MPdist : float
+        The matrix profile distance
+
+    Notes
+    -----
+    `DOI: 10.1109/ICDM.2018.00119 \
+    <https://www.cs.ucr.edu/~eamonn/MPdist_Expanded.pdf>`__
+
+    See Section III
+    """
+    n_A = T_A.shape[0]
+    n_B = T_B.shape[0]
+    P_ABBA = np.empty(n_A - m + 1 + n_B - m + 1, dtype=np.float64)
+
+    _compute_P_ABBA(
+        T_A,
+        T_B,
+        m,
+        P_ABBA,
+        partial_mp_func,
+        client,
+        device_id,
+    )
+
+    if k is not None:
+        k = min(int(k), P_ABBA.shape[0] - 1)
+    else:
+        percentage = np.clip(percentage, 0.0, 1.0)
+        k = min(math.ceil(percentage * (n_A + n_B)), n_A - m + 1 + n_B - m + 1 - 1)
+
+    MPdist = _select_P_ABBA_value(P_ABBA, k, custom_func)
+
+    return MPdist
+
+
+def process_isconstant(T, m, T_subseq_isconstant, T_subseq_isfinite=None):
+    """
+    A convenience wrapper around the `rolling_isconstant` and
+    `fix_isconstant_isfinite_conflicts`.
+
+    It computes the rolling isconstant for 1-D and 2-D arrays. This is accomplished by
+    comparing the min and max within each window and assigning `True` when the min and
+    max are equal and `False` otherwise. If a subsequence contains at least one NaN,
+    then the subsequence is not constant. If `T_subseq_isconstant` is provided as
+    boolean array, its element will be set to False if their corresponding value in
+    `T_subseq_isfinite` is False.
+
+    Parameters
+    ----------
+    T : numpy.ndarray
+        The input 1D or 2D array
+
+    m : numpy.ndarray
+        The rolling window size
+
+    T_subseq_isconstant : np.ndarray, function, or list, default None
+        A parameter that is used to show whether a subsequence of a time series in `T`
+        is constant (True) or not. T_subseq_isconstant can be a 1D or 2D boolean
+        numpy.ndarry (depending on the dimension of `T`) or a function that can be
+        applied to each time series in `T`. Alternatively, for  maximum flexibility, a
+        list (with length equal to the total number of time series) may also be used.
+        In this case, T_subseq_isconstant[i] corresponds to the i-th time series T[i]
+        and each element in the list can either be 1D boolean np.ndarray, a function,
+        or None.
+
+    T_subseq_isfinite : numpy.ndarray, default None
+        A boolean array that indicates whether a subsequence in `T` contains a
+        `np.nan`/`np.inf` value (False)
+
+    Returns
+    -------
+    T_subseq_isconstant : numpy.ndarray
+        Rolling window isconstant
+    """
+    if isinstance(T_subseq_isconstant, list):
+        if T.ndim != 2:  # pragma: no cover
+            msg = (
+                "When `T_subseq_isconstant` is provided as a list, `T` "
+                + f"must be a 2D array. Found {T.ndim} dimension instead."
+            )
+            raise ValueError(msg)
+
+        if len(T_subseq_isconstant) != T.shape[0]:  # pragma: no cover
+            msg = (
+                "The lenght of the list `T_subseq_isconstant` must be "
+                + "equal to the number of time series in `T`."
+            )
+            raise ValueError(msg)
+
+        T_subseq_isconstant = np.array(
+            [
+                rolling_isconstant(T[i], m, T_subseq_isconstant[i])
+                for i in range(T.shape[0])
+            ]
+        )
+    else:
+        T_subseq_isconstant = rolling_isconstant(T, m, T_subseq_isconstant)
+
+    T_subseq_isconstant[...] = fix_isconstant_isfinite_conflicts(
+        T, m, T_subseq_isconstant, T_subseq_isfinite
+    )
+
+    return T_subseq_isconstant

@@ -2,16 +2,12 @@
 # Copyright 2019 TD Ameritrade. Released under the terms of the 3-Clause BSD license.
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
-import logging
-
+import numba
 import numpy as np
 from numba import njit, prange
-import numba
 
-from . import core, config
+from . import config, core
 from .aamp import aamp
-
-logger = logging.getLogger(__name__)
 
 
 @njit(
@@ -24,10 +20,10 @@ def _compute_diagonal(
     T_A,
     T_B,
     m,
-    M_T,
     μ_Q,
-    Σ_T_inverse,
+    M_T,
     σ_Q_inverse,
+    Σ_T_inverse,
     cov_a,
     cov_b,
     cov_c,
@@ -59,24 +55,24 @@ def _compute_diagonal(
         The time series or sequence for which to compute the matrix profile
 
     T_B : numpy.ndarray
-        The time series or sequence that will be used to annotate T_A. For every
-        subsequence in T_A, its nearest neighbor in T_B will be recorded.
+        The time series or sequence that will be used to annotate `T_A`. For every
+        subsequence in `T_A`, its nearest neighbor in `T_B` will be recorded.
 
     m : int
         Window size
 
-    M_T : numpy.ndarray
-        Sliding mean of time series, `T`
-
     μ_Q : numpy.ndarray
         Mean of the query sequence, `Q`, relative to the current sliding window
 
-    Σ_T_inverse : numpy.ndarray
-        Inverse sliding standard deviation of time series, `T`
+    M_T : numpy.ndarray
+        Sliding mean of time series, `T`
 
     σ_Q_inverse : numpy.ndarray
         Inverse standard deviation of the query sequence, `Q`, relative to the current
         sliding window
+
+    Σ_T_inverse : numpy.ndarray
+        Inverse sliding standard deviation of time series, `T`
 
     cov_a : numpy.ndarray
         The first covariance term relating T_A[i + g + m - 1] and M_T_m_1[i + g]
@@ -89,10 +85,6 @@ def _compute_diagonal(
 
     cov_d : numpy.ndarray
         The fourth covariance term relating T_B[i - 1] and μ_Q_m_1[i]
-
-    μ_Q_m_1 : numpy.ndarray
-        Mean of the query sequence, `Q`, relative to the current sliding window and
-        using a window size of `m-1`
 
     T_A_subseq_isfinite : numpy.ndarray
         A boolean array that indicates whether a subsequence in `T_A` contains a
@@ -141,11 +133,6 @@ def _compute_diagonal(
     ignore_trivial : bool
         Set to `True` if this is a self-join. Otherwise, for AB-join, set this to
         `False`. Default is `True`.
-
-    k : int
-        The number of top `k` smallest distances used to construct the matrix profile.
-        Note that this will increase the total computational time and memory usage
-        when k > 1.
 
     Returns
     -------
@@ -210,15 +197,15 @@ def _compute_diagonal(
 
             if T_B_subseq_isfinite[uint64_j] and T_A_subseq_isfinite[uint64_i]:
                 # Neither subsequence contains NaNs
-                if T_B_subseq_isconstant[uint64_j] or T_A_subseq_isconstant[uint64_i]:
+                if T_B_subseq_isconstant[uint64_j] and T_A_subseq_isconstant[uint64_i]:
+                    pearson = 1.0
+                elif T_B_subseq_isconstant[uint64_j] or T_A_subseq_isconstant[uint64_i]:
                     pearson = 0.5
                 else:
                     pearson = cov * Σ_T_inverse[uint64_j] * σ_Q_inverse[uint64_i]
+                    pearson = min(1.0, pearson)
 
-                if T_B_subseq_isconstant[uint64_j] and T_A_subseq_isconstant[uint64_i]:
-                    pearson = 1.0
-
-                # `ρ[thread_idx, i, :]` is sorted ascendingly and MUST be updated
+                # `ρ[thread_idx, i, :]` is sorted in ascending order and MUST be updated
                 # when the newly-calculated `pearson` value becomes greater than the
                 # first (i.e. smallest) element in this array. Note that a higher
                 # pearson value corresponds to a lower distance.
@@ -265,12 +252,12 @@ def _stump(
     T_A,
     T_B,
     m,
-    M_T,
     μ_Q,
-    Σ_T_inverse,
+    M_T,
     σ_Q_inverse,
-    M_T_m_1,
+    Σ_T_inverse,
     μ_Q_m_1,
+    M_T_m_1,
     T_A_subseq_isfinite,
     T_B_subseq_isfinite,
     T_A_subseq_isconstant,
@@ -291,31 +278,31 @@ def _stump(
         The time series or sequence for which to compute the matrix profile
 
     T_B : numpy.ndarray
-        The time series or sequence that will be used to annotate T_A. For every
-        subsequence in T_A, its nearest neighbor in T_B will be recorded.
+        The time series or sequence that will be used to annotate `T_A`. For every
+        subsequence in `T_A`, its nearest neighbor in `T_B` will be recorded.
 
     m : int
         Window size
 
-    M_T : numpy.ndarray
-        Sliding mean of time series, `T`
-
     μ_Q : numpy.ndarray
         Mean of the query sequence, `Q`, relative to the current sliding window
 
-    Σ_T_inverse : numpy.ndarray
-        Inverse sliding standard deviation of time series, `T`
+    M_T : numpy.ndarray
+        Sliding mean of time series, `T`
 
     σ_Q_inverse : numpy.ndarray
         Inverse standard deviation of the query sequence, `Q`, relative to the current
         sliding window
 
-    M_T_m_1 : numpy.ndarray
-        Sliding mean of time series, `T`, using a window size of `m-1`
+    Σ_T_inverse : numpy.ndarray
+        Inverse sliding standard deviation of time series, `T`
 
     μ_Q_m_1 : numpy.ndarray
         Mean of the query sequence, `Q`, relative to the current sliding window and
         using a window size of `m-1`
+
+    M_T_m_1 : numpy.ndarray
+        Sliding mean of time series, `T`, using a window size of `m-1`
 
     T_A_subseq_isfinite : numpy.ndarray
         A boolean array that indicates whether a subsequence in `T_A` contains a
@@ -345,22 +332,22 @@ def _stump(
 
     Returns
     -------
-    profile : numpy.ndarray
+    out1 : numpy.ndarray
         The (top-k) matrix profile
 
-    indices : numpy.ndarray
-        The (top-k) matrix profile indices
-
-    left profile : numpy.ndarray
+    out2 : numpy.ndarray
         The (top-1) left matrix profile
 
-    left indices : numpy.ndarray
-        The (top-1) left matrix profile indices
-
-    right profile : numpy.ndarray
+    out3 : numpy.ndarray
         The (top-1) right matrix profile
 
-    right indices : numpy.ndarray
+    out4 : numpy.ndarray
+        The (top-k) matrix profile indices
+
+    out5 : numpy.ndarray
+        The (top-1) left matrix profile indices
+
+    out6 : numpy.ndarray
         The (top-1) right matrix profile indices
 
     Notes
@@ -449,10 +436,10 @@ def _stump(
             T_A,
             T_B,
             m,
-            M_T,
             μ_Q,
-            Σ_T_inverse,
+            M_T,
             σ_Q_inverse,
+            Σ_T_inverse,
             cov_a,
             cov_b,
             cov_c,
@@ -508,15 +495,31 @@ def _stump(
         if p_norm_R[i] < config.STUMPY_P_NORM_THRESHOLD:
             p_norm_R[i] = 0.0
 
-    P = np.sqrt(p_norm)
-    PL = np.sqrt(p_norm_L)
-    PR = np.sqrt(p_norm_R)
+    return (
+        np.sqrt(p_norm),
+        np.sqrt(p_norm_L),
+        np.sqrt(p_norm_R),
+        I,
+        IL[0],
+        IR[0],
+    )
 
-    return P, PL, PR, I, IL[0], IR[0]
 
-
-@core.non_normalized(aamp)
-def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
+@core.non_normalized(
+    aamp,
+    exclude=["normalize", "p", "T_A_subseq_isconstant", "T_B_subseq_isconstant"],
+)
+def stump(
+    T_A,
+    m,
+    T_B=None,
+    ignore_trivial=True,
+    normalize=True,
+    p=2.0,
+    k=1,
+    T_A_subseq_isconstant=None,
+    T_B_subseq_isconstant=None,
+):
     """
     Compute the z-normalized matrix profile
 
@@ -547,14 +550,36 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
         equivalent set in the `@core.non_normalized` function decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
 
     k : int, default 1
         The number of top `k` smallest distances used to construct the matrix profile.
         Note that this will increase the total computational time and memory usage
         when k > 1. If you have access to a GPU device, then you may be able to
         leverage `gpu_stump` for better performance and scalability.
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -626,6 +651,7 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
     Examples
     --------
     >>> import stumpy
+    >>> import numpy as np
     >>> stumpy.stump(np.array([584., -11., 23., 79., 1001., 0., -19.]), m=3)
     array([[0.11633857113691416, 4, -1, 4],
            [2.694073918063438, 3, -1, 3],
@@ -634,8 +660,9 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
            [0.11633857113691416, 0, 0, -1]], dtype=object)
     """
     if T_B is None:
-        T_B = T_A
         ignore_trivial = True
+        T_B = T_A
+        T_B_subseq_isconstant = T_A_subseq_isconstant
 
     (
         T_A,
@@ -644,7 +671,7 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
         μ_Q_m_1,
         T_A_subseq_isfinite,
         T_A_subseq_isconstant,
-    ) = core.preprocess_diagonal(T_A, m)
+    ) = core.preprocess_diagonal(T_A, m, T_subseq_isconstant=T_A_subseq_isconstant)
 
     (
         T_B,
@@ -653,7 +680,7 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
         M_T_m_1,
         T_B_subseq_isfinite,
         T_B_subseq_isconstant,
-    ) = core.preprocess_diagonal(T_B, m)
+    ) = core.preprocess_diagonal(T_B, m, T_subseq_isconstant=T_B_subseq_isconstant)
 
     if T_A.ndim != 1:  # pragma: no cover
         raise ValueError(
@@ -668,14 +695,7 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
         )
 
     core.check_window_size(m, max_size=min(T_A.shape[0], T_B.shape[0]))
-
-    if ignore_trivial is False and core.are_arrays_equal(T_A, T_B):  # pragma: no cover
-        logger.warning("Arrays T_A, T_B are equal, which implies a self-join.")
-        logger.warning("Try setting `ignore_trivial = True`.")
-
-    if ignore_trivial and core.are_arrays_equal(T_A, T_B) is False:  # pragma: no cover
-        logger.warning("Arrays T_A, T_B are not equal, which implies an AB-join.")
-        logger.warning("Try setting `ignore_trivial = False`.")
+    ignore_trivial = core.check_ignore_trivial(T_A, T_B, ignore_trivial)
 
     n_A = T_A.shape[0]
     n_B = T_B.shape[0]
@@ -692,12 +712,12 @@ def stump(T_A, m, T_B=None, ignore_trivial=True, normalize=True, p=2.0, k=1):
         T_A,
         T_B,
         m,
-        M_T,
         μ_Q,
-        Σ_T_inverse,
+        M_T,
         σ_Q_inverse,
-        M_T_m_1,
+        Σ_T_inverse,
         μ_Q_m_1,
+        M_T_m_1,
         T_A_subseq_isfinite,
         T_B_subseq_isfinite,
         T_A_subseq_isconstant,

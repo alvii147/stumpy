@@ -4,7 +4,9 @@
 
 import numpy as np
 
-from . import core, aamp, aamped
+from . import core
+from .aamp import aamp
+from .aamped import aamped
 
 
 def _aamp_across_series_nearest_neighbors(
@@ -34,7 +36,9 @@ def _aamp_across_series_nearest_neighbors(
         A list of rolling window `T_subseq_isfinite` for each time series in `Ts`
 
     p : float
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -91,7 +95,9 @@ def _get_aamp_central_motif(
         A list of rolling window `T_subseq_isfinite` for each time series in `Ts`
 
     p : float
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -134,7 +140,7 @@ def _aamp_ostinato(
     m,
     Ts_subseq_isfinite,
     p=2.0,
-    dask_client=None,
+    client=None,
     device_id=None,
     mp_func=aamp,
 ):
@@ -153,12 +159,13 @@ def _aamp_ostinato(
         A list of rolling window `T_subseq_isfinite` for each time series in `Ts`
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
-    dask_client : client, default None
-        A Dask Distributed client that is connected to a Dask scheduler and
-        Dask workers. Setting up a Dask distributed cluster is beyond the
-        scope of this library. Please refer to the Dask Distributed
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
         documentation.
 
     device_id : int or list, default None
@@ -167,7 +174,7 @@ def _aamp_ostinato(
         computation. A list of all valid device ids can be obtained by
         executing `[device.id for device in numba.cuda.list_devices()]`.
 
-    mp_func : object, default stump
+    mp_func : function, default stump
         Specify a custom matrix profile function to use for computing matrix profiles
 
     Returns
@@ -207,7 +214,7 @@ def _aamp_ostinato(
     bsf_subseq_idx = 0
 
     partial_mp_func = core._get_partial_mp_func(
-        mp_func, dask_client=dask_client, device_id=device_id
+        mp_func, client=client, device_id=device_id
     )
 
     k = len(Ts)
@@ -259,7 +266,9 @@ def aamp_ostinato(Ts, m, p=2.0):
         Window size
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -298,20 +307,27 @@ def aamp_ostinato(Ts, m, p=2.0):
 
     Ts_subseq_isfinite = [None] * len(Ts)
     for i, T in enumerate(Ts):
-        Ts[i], Ts_subseq_isfinite[i] = core.preprocess_non_normalized(T, m)
+        (
+            Ts[i],
+            Ts_subseq_isfinite[i],
+        ) = core.preprocess_non_normalized(T, m)
 
     bsf_radius, bsf_Ts_idx, bsf_subseq_idx = _aamp_ostinato(
         Ts, m, Ts_subseq_isfinite, p
     )
 
-    (central_radius, central_Ts_idx, central_subseq_idx,) = _get_aamp_central_motif(
+    (
+        central_radius,
+        central_Ts_idx,
+        central_subseq_idx,
+    ) = _get_aamp_central_motif(
         Ts, bsf_radius, bsf_Ts_idx, bsf_subseq_idx, m, Ts_subseq_isfinite, p
     )
 
     return central_radius, central_Ts_idx, central_subseq_idx
 
 
-def aamp_ostinatoed(dask_client, Ts, m, p=2.0):
+def aamp_ostinatoed(client, Ts, m, p=2.0):
     """
     Find the non-normalized (i.e., without z-normalization) consensus motif of multiple
     time series with a distributed dask cluster
@@ -322,10 +338,9 @@ def aamp_ostinatoed(dask_client, Ts, m, p=2.0):
 
     Parameters
     ----------
-    dask_client : client
-        A Dask Distributed client that is connected to a Dask scheduler and
-        Dask workers. Setting up a Dask distributed cluster is beyond the
-        scope of this library. Please refer to the Dask Distributed
+    client : client
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
         documentation.
 
     Ts : list
@@ -335,7 +350,9 @@ def aamp_ostinatoed(dask_client, Ts, m, p=2.0):
         Window size
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -374,18 +391,25 @@ def aamp_ostinatoed(dask_client, Ts, m, p=2.0):
 
     Ts_subseq_isfinite = [None] * len(Ts)
     for i, T in enumerate(Ts):
-        Ts[i], Ts_subseq_isfinite[i] = core.preprocess_non_normalized(T, m)
+        (
+            Ts[i],
+            Ts_subseq_isfinite[i],
+        ) = core.preprocess_non_normalized(T, m)
 
     bsf_radius, bsf_Ts_idx, bsf_subseq_idx = _aamp_ostinato(
         Ts,
         m,
         Ts_subseq_isfinite,
         p=p,
-        dask_client=dask_client,
+        client=client,
         mp_func=aamped,
     )
 
-    (central_radius, central_Ts_idx, central_subseq_idx,) = _get_aamp_central_motif(
+    (
+        central_radius,
+        central_Ts_idx,
+        central_subseq_idx,
+    ) = _get_aamp_central_motif(
         Ts,
         bsf_radius,
         bsf_Ts_idx,

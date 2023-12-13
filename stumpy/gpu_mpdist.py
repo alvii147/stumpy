@@ -5,14 +5,25 @@
 # import numpy as np
 # import math
 
-from . import core, gpu_stump
-from .mpdist import _mpdist
+import functools
+
+from . import core
 from .gpu_aampdist import gpu_aampdist
+from .gpu_stump import gpu_stump
 
 
 @core.non_normalized(gpu_aampdist)
 def gpu_mpdist(
-    T_A, T_B, m, percentage=0.05, k=None, device_id=0, normalize=True, p=2.0
+    T_A,
+    T_B,
+    m,
+    percentage=0.05,
+    k=None,
+    device_id=0,
+    normalize=True,
+    p=2.0,
+    T_A_subseq_isconstant=None,
+    T_B_subseq_isconstant=None,
 ):
     """
     Compute the z-normalized matrix profile distance (MPdist) measure between any two
@@ -56,8 +67,30 @@ def gpu_mpdist(
         equivalent set in the `@core.non_normalized` function decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -73,6 +106,8 @@ def gpu_mpdist(
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> from numba import cuda
     >>> if __name__ == "__main__":
     ...     all_gpu_devices = [device.id for device in cuda.list_devices()]
@@ -83,6 +118,13 @@ def gpu_mpdist(
     ...         device_id=all_gpu_devices)
     0.00019935236191097894
     """
-    MPdist = _mpdist(T_A, T_B, m, percentage, k, device_id=device_id, mp_func=gpu_stump)
+    partial_gpu_stump = functools.partial(
+        gpu_stump,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
+    )
+    MPdist = core._mpdist(
+        T_A, T_B, m, partial_gpu_stump, percentage, k, device_id=device_id
+    )
 
     return MPdist

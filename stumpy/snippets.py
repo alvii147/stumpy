@@ -3,11 +3,13 @@
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
 import math
+
 import numpy as np
+
 from . import core
-from .core import check_window_size, _get_mask_slices
-from .mpdist import _mpdist_vect
 from .aampdist_snippets import aampdist_snippets
+from .core import _get_mask_slices, check_window_size
+from .mpdist import _mpdist_vect
 
 
 def _get_all_profiles(
@@ -18,6 +20,7 @@ def _get_all_profiles(
     mpdist_percentage=0.05,
     mpdist_k=None,
     mpdist_custom_func=None,
+    mpdist_T_subseq_isconstant=None,
 ):
     """
     For each non-overlapping subsequence, `S[i]`, in `T`, compute the matrix profile
@@ -55,12 +58,22 @@ def _get_all_profiles(
         Specify the `k`th value in the concatenated matrix profiles to return. When
         `mpdist_k` is not `None`, then the `mpdist_percentage` parameter is ignored.
 
-    mpdist_custom_func : object, default None
+    mpdist_custom_func : func, default None
         A custom user defined function for selecting the desired value from the
         sorted `P_ABBA` array. This function may need to leverage `functools.partial`
         and should take `P_ABBA` as its only input parameter and return a single
         `MPdist` value. The `percentage` and `k` parameters are ignored when
         `mpdist_custom_func` is not None.
+
+    mpdist_T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence (of length `s`) in `T`
+        is constant (True). Alternatively, a custom, user-defined function that
+        returns a boolean array that indicates whether a subsequence in `T` is
+        constant (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -81,25 +94,30 @@ def _get_all_profiles(
             f"Please try `m <= len(T) // 2`."
         )
 
-    right_pad = 0
-    if T.shape[0] % m != 0:
-        right_pad = int(m * np.ceil(T.shape[0] / m) - T.shape[0])
-        pad_width = (0, right_pad)
-        T = np.pad(T, pad_width, mode="constant", constant_values=np.nan)
-
-    n_padded = T.shape[0]
-    D = np.empty(((n_padded // m) - 1, n_padded - m + 1), dtype=np.float64)
-
     if s is not None:
         s = min(int(s), m)
     else:
         percentage = np.clip(percentage, 0.0, 1.0)
         s = min(math.ceil(percentage * m), m)
 
+    right_pad = 0
+    T_subseq_isconstant = core.process_isconstant(T, s, mpdist_T_subseq_isconstant)
+    n_contiguous_windows = int(T.shape[0] // m)
+    if T.shape[0] % m != 0:
+        right_pad = int(m * np.ceil(T.shape[0] / m) - T.shape[0])
+        pad_width = (0, right_pad)
+        T = np.pad(T, pad_width, mode="constant", constant_values=np.nan)
+        T_subseq_isconstant = np.pad(
+            T_subseq_isconstant, pad_width, mode="constant", constant_values=False
+        )
+
+    n_padded = T.shape[0]
+    D = np.empty((n_contiguous_windows, n_padded - m + 1), dtype=np.float64)
+
     M_T, Σ_T = core.compute_mean_std(T, s)
 
     # Iterate over non-overlapping subsequences, see Definition 3
-    for i in range((n_padded // m) - 1):
+    for i in range(n_contiguous_windows):
         start = i * m
         stop = (i + 1) * m
         S_i = T[start:stop]
@@ -107,13 +125,16 @@ def _get_all_profiles(
             S_i,
             T,
             s,
-            M_T[start : start + s],
-            Σ_T[start : start + s],
+            M_T[start : stop - s + 1],
+            Σ_T[start : stop - s + 1],
             M_T,
             Σ_T,
+            T_subseq_isconstant[start : stop - s + 1],
+            T_subseq_isconstant,
             percentage=mpdist_percentage,
             k=mpdist_k,
             custom_func=mpdist_custom_func,
+            query_idx=start,
         )
 
     stop_idx = n_padded - m + 1 - right_pad
@@ -122,7 +143,13 @@ def _get_all_profiles(
     return D
 
 
-@core.non_normalized(aampdist_snippets)
+@core.non_normalized(
+    aampdist_snippets,
+    exclude=[
+        "normalize",
+        "mpdist_T_subseq_isconstant",
+    ],
+)
 def snippets(
     T,
     m,
@@ -133,6 +160,7 @@ def snippets(
     mpdist_k=None,
     normalize=True,
     p=2.0,
+    mpdist_T_subseq_isconstant=None,
 ):
     """
     Identify the top `k` snippets that best represent the time series, `T`
@@ -179,8 +207,20 @@ def snippets(
         equivalent set in the `@core.non_normalized` function decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
+
+    mpdist_T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence (of length `s`) in `T`
+        is constant (True). Alternatively, a custom, user-defined function that
+        returns a boolean array that indicates whether a subsequence in `T` is
+        constant (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -215,6 +255,8 @@ def snippets(
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> stumpy.snippets(np.array([584., -11., 23., 79., 1001., 0., -19.]), m=3, k=2)
     (array([[ 584.,  -11.,   23.],
             [  79., 1001.,    0.]]),
@@ -246,11 +288,8 @@ def snippets(
         s=s,
         mpdist_percentage=mpdist_percentage,
         mpdist_k=mpdist_k,
+        mpdist_T_subseq_isconstant=mpdist_T_subseq_isconstant,
     )
-
-    pad_width = (0, int(m * np.ceil(T.shape[0] / m) - T.shape[0]))
-    T_padded = np.pad(T, pad_width, mode="constant", constant_values=np.nan)
-    n_padded = T_padded.shape[0]
 
     snippets = np.empty((k, m), dtype=np.float64)
     snippets_indices = np.empty(k, dtype=np.int64)
@@ -258,7 +297,7 @@ def snippets(
     snippets_fractions = np.empty(k, dtype=np.float64)
     snippets_areas = np.empty(k, dtype=np.float64)
     Q = np.full(D.shape[-1], np.inf, dtype=np.float64)
-    indices = np.arange(0, n_padded - m, m, dtype=np.int64)
+    indices = np.arange(D.shape[0], dtype=np.int64) * m
     snippets_regimes_list = []
 
     for i in range(k):

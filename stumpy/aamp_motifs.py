@@ -2,13 +2,11 @@
 # Copyright 2019 TD Ameritrade. Released under the terms of the 3-Clause BSD license.
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
-import logging
+import warnings
 
 import numpy as np
 
-from . import core, config
-
-logger = logging.getLogger(__name__)
+from . import config, core
 
 
 def _aamp_motifs(
@@ -45,7 +43,9 @@ def _aamp_motifs(
         `np.nan`/`np.inf` value (False)
 
     p : float
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     excl_zone : int
         Size of the exclusion zone
@@ -77,8 +77,8 @@ def _aamp_motifs(
         The absolute tolerance parameter. This value will be added to `max_distance`
         when comparing distances between subsequences.
 
-    Return
-    ------
+    Returns
+    -------
     motif_distances : numpy.ndarray
         The distances corresponding to a set of subsequence matches for each motif.
         Note that the first column always corresponds to the distance for the
@@ -172,13 +172,13 @@ def aamp_motifs(
     truncation in the number of rows (i.e., motifs)  may be the result of insufficient
     candidate motifs with matches greater than or equal to `min_neighbors` or that the
     matrix profile value for the candidate motif was larger than `cutoff`. Similarly,
-    any truncationin in the number of columns (i.e., matches) may be the result of
+    any truncation in the number of columns (i.e., matches) may be the result of
     insufficient matches being found with distances (to their corresponding candidate
     motif) that are equal to or less than `max_distance`. Only motifs and matches that
     satisfy all of these constraints will be returned.
 
     If you must return a shape of `(max_motifs, max_matches)`, then you may consider
-    specifying a smaller `min_neighors`, a larger `max_distance`, and/or a larger
+    specifying a smaller `min_neighbors`, a larger `max_distance`, and/or a larger
     `cutoff`. For example, while it is ill advised, setting `min_neighbors=1`,
     `max_distance=np.inf`, and `cutoff=np.inf` will ensure that the shape of the output
     arrays will be `(max_motifs, max_matches)`. However, given the lack of constraints,
@@ -229,10 +229,12 @@ def aamp_motifs(
         when comparing distances between subsequences.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
-    Return
-    ------
+    Returns
+    -------
     motif_distances : numpy.ndarray
         The distances corresponding to a set of subsequence matches for each motif.
         Note that the first column always corresponds to the distance for the
@@ -245,11 +247,10 @@ def aamp_motifs(
 
     """
     if max_motifs < 1:  # pragma: no cover
-        logger.warn(
-            "The maximum number of motifs, `max_motifs`, "
-            "must be greater than or equal to 1"
-        )
-        logger.warn("`max_motifs` has been set to `1`")
+        msg = "The maximum number of motifs, `max_motifs`, "
+        msg += "must be greater than or equal to 1.\n"
+        msg += "`max_motifs` has been set to `1`"
+        warnings.warn(msg)
         max_motifs = 1
 
     if T.ndim != 1:  # pragma: no cover
@@ -277,17 +278,14 @@ def aamp_motifs(
 
     if cutoff == 0.0:  # pragma: no cover
         suggested_cutoff = np.partition(P, 1)[1]
-        logger.warn(
-            "The `cutoff` has been set to 0.0 and may result in little/no candidate "
-            "motifs being identified."
-        )
-        logger.warn(
-            "You may consider relaxing the constraint by increasing the `cutoff` "
-            f"(e.g., cutoff={suggested_cutoff})."
-        )
+        msg = "The `cutoff` has been set to 0.0 and may result in little/no candidate "
+        msg += "motifs being identified.\n"
+        msg += "You may consider relaxing the constraint by increasing the `cutoff` "
+        msg += f"(e.g., cutoff={suggested_cutoff})."
+        warnings.warn(msg)
 
-    T, T_subseq_isfinite = core.preprocess_non_normalized(T[np.newaxis, :], m)
-    P = P[np.newaxis, :].astype(np.float64)
+    T, T_subseq_isfinite = core.preprocess_non_normalized(np.expand_dims(T, 0), m)
+    P = np.expand_dims(P, 0).astype(np.float64)
 
     motif_distances, motif_indices = _aamp_motifs(
         T,
@@ -302,6 +300,12 @@ def aamp_motifs(
         max_motifs,
         atol=atol,
     )
+
+    if motif_distances.shape[1] == 0:  # pragma: no cover
+        msg = "No motifs were found. You may consider increasing the `cutoff` "
+        msg += f"(e.g., cutoff={2. * cutoff}) and/or increasing the `max_distance `"
+        msg += "(e.g., max_distance=np.inf)."
+        warnings.warn(msg)
 
     return motif_distances, motif_indices
 
@@ -362,7 +366,9 @@ def aamp_match(
         that the self-match will be returned first.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -375,9 +381,9 @@ def aamp_match(
         raise ValueError("Q contains illegal values (NaN or inf)")
 
     if len(Q.shape) == 1:
-        Q = Q[np.newaxis, :]
+        Q = np.expand_dims(Q, 0)
     if len(T.shape) == 1:
-        T = T[np.newaxis, :]
+        T = np.expand_dims(T, 0)
 
     d, n = T.shape
     m = Q.shape[1]
@@ -386,7 +392,7 @@ def aamp_match(
     if T_subseq_isfinite is None:
         T, T_subseq_isfinite = core.preprocess_non_normalized(T, m)
     if len(T_subseq_isfinite.shape) == 1:
-        T_subseq_isfinite = T_subseq_isfinite[np.newaxis, :]
+        T_subseq_isfinite = np.expand_dims(T_subseq_isfinite, 0)
 
     D = np.empty((d, n - m + 1))
     for i in range(d):

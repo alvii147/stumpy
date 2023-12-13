@@ -3,8 +3,11 @@
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
 import numpy as np
-from . import core, stump, scrump, stumped
+
+from . import core, scrump
 from .aamp_stimp import aamp_stimp, aamp_stimped
+from .stump import stump
+from .stumped import stumped
 
 
 def _normalize_pan(pan, ms, bfs_indices, n_processed):
@@ -33,7 +36,7 @@ def _normalize_pan(pan, ms, bfs_indices, n_processed):
     """
     idx = bfs_indices[:n_processed]
     norm = 1.0 / (2.0 * np.sqrt(ms[:n_processed]))
-    pan[idx] = np.minimum(1.0, pan[idx] * norm[:, np.newaxis])
+    pan[idx] = np.minimum(1.0, pan[idx] * np.expand_dims(norm, 1))
 
 
 class _stimp:
@@ -47,16 +50,16 @@ class _stimp:
     T : numpy.ndarray
         The time series or sequence for which to compute the pan matrix profile
 
-    m_start : int, default 3
+    min_m : int, default 3
         The starting (or minimum) subsequence window size for which a matrix profile
         may be computed
 
-    m_stop : int, default None
+    max_m : int, default None
         The stopping (or maximum) subsequence window size for which a matrix profile
-        may be computed. When `m_stop = Non`, this is set to the maximum allowable
+        may be computed. When `max_m = Non`, this is set to the maximum allowable
         subsequence window size
 
-    m_step : int, default 1
+    step : int, default 1
         The step between subsequence window sizes
 
     percentage : float, default 0.01
@@ -70,10 +73,9 @@ class _stimp:
         computing SCRIMP. If set to `True`, this is equivalent to computing
         SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
-    dask_client : client, default None
-        A Dask Distributed client that is connected to a Dask scheduler and
-        Dask workers. Setting up a Dask distributed cluster is beyond the
-        scope of this library. Please refer to the Dask Distributed
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
         documentation.
 
     device_id : int or list, default None
@@ -82,8 +84,16 @@ class _stimp:
         computation. A list of all valid device ids can be obtained by
         executing `[device.id for device in numba.cuda.list_devices()]`.
 
-    mp_func : object, default stump
+    mp_func : function, default stump
         The matrix profile function to use when `percentage = 1.0`
+
+    T_subseq_isconstant_func : function, default None
+        A custom, user-defined function that returns a boolean array that indicates
+        whether a subsequence in `T` is constant (True). The function must only take
+        two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+        arguments may be specified by currying the user-defined function using
+        `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+        automatically have its corresponding value set to False in this boolean array.
 
     Attributes
     ----------
@@ -117,9 +127,10 @@ class _stimp:
         step=1,
         percentage=0.01,
         pre_scrump=True,
-        dask_client=None,
+        client=None,
         device_id=None,
         mp_func=stump,
+        T_subseq_isconstant_func=None,
     ):
         """
         Initialize the `stimp` object and compute the Pan Matrix Profile
@@ -152,10 +163,9 @@ class _stimp:
             computing SCRIMP. If set to `True`, this is equivalent to computing
             SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
-        dask_client : client, default None
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
+        client : client, default None
+            A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+            the scope of this library. Please refer to the Dask or Ray Distributed
             documentation.
 
         device_id : int or list, default None
@@ -164,8 +174,17 @@ class _stimp:
             computation. A list of all valid device ids can be obtained by
             executing `[device.id for device in numba.cuda.list_devices()]`.
 
-        mp_func : object, default stump
+        mp_func : function, default stump
             The matrix profile function to use when `percentage = 1.0`
+
+        T_subseq_isconstant_func : function, default None
+            A custom, user-defined function that returns a boolean array that indicates
+            whether a subsequence in `T` is constant (True). The function must only take
+            two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+            arguments may be specified by currying the user-defined function using
+            `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+            automatically have its corresponding value set to False in this boolean
+            array.
         """
         self._T = T.copy()
         if max_m is None:
@@ -184,10 +203,19 @@ class _stimp:
         percentage = np.clip(percentage, 0.0, 1.0)
         self._percentage = percentage
         self._pre_scrump = pre_scrump
-        partial_mp_func = core._get_partial_mp_func(
-            mp_func, dask_client=dask_client, device_id=device_id
+        self._partial_mp_func = core._get_partial_mp_func(
+            mp_func, client=client, device_id=device_id
         )
-        self._mp_func = partial_mp_func
+
+        if T_subseq_isconstant_func is None:
+            T_subseq_isconstant_func = core._rolling_isconstant
+        if not callable(T_subseq_isconstant_func):  # pragma: no cover
+            msg = (
+                "`T_subseq_isconstant_func` was expected to be a callable function "
+                + f"but {type(T_subseq_isconstant_func)} was found."
+            )
+            raise ValueError(msg)
+        self._T_subseq_isconstant_func = T_subseq_isconstant_func
 
         self._PAN = np.full(
             (self._M.shape[0], self._T.shape[0]), fill_value=np.inf, dtype=np.float64
@@ -197,6 +225,14 @@ class _stimp:
         """
         Update the pan matrix profile by computing a single matrix profile using the
         next available subsequence window size
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
 
         Notes
         -----
@@ -215,16 +251,18 @@ class _stimp:
                     percentage=self._percentage,
                     pre_scrump=self._pre_scrump,
                     k=1,
+                    T_A_subseq_isconstant=self._T_subseq_isconstant_func,
                 )
                 approx.update()
                 self._PAN[
                     self._bfs_indices[self._n_processed], : approx.P_.shape[0]
                 ] = approx.P_
             else:
-                out = self._mp_func(
+                out = self._partial_mp_func(
                     self._T,
                     m,
                     ignore_trivial=True,
+                    T_A_subseq_isconstant=self._T_subseq_isconstant_func,
                 )
                 self._PAN[
                     self._bfs_indices[self._n_processed], : out[:, 0].shape[0]
@@ -296,6 +334,14 @@ class _stimp:
         """
         Get the transformed (i.e., normalized, contrasted, binarized, and repeated) pan
         matrix profile
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         return self.pan().astype(np.float64)
 
@@ -303,6 +349,14 @@ class _stimp:
     def M_(self):
         """
         Get all of the (breadth first searched (level) ordered) subsequence window sizes
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         return self._M.astype(np.int64)
 
@@ -323,7 +377,7 @@ class _stimp:
 
 @core.non_normalized(
     aamp_stimp,
-    exclude=["pre_scrump", "normalize", "p", "pre_scraamp"],
+    exclude=["pre_scrump", "normalize", "p", "T_subseq_isconstant_func", "pre_scraamp"],
     replace={"pre_scrump": "pre_scraamp"},
 )
 class stimp(_stimp):
@@ -337,16 +391,16 @@ class stimp(_stimp):
     T : numpy.ndarray
         The time series or sequence for which to compute the pan matrix profile
 
-    m_start : int, default 3
+    min_m : int, default 3
         The starting (or minimum) subsequence window size for which a matrix profile
         may be computed
 
-    m_stop : int, default None
+    max_m : int, default None
         The stopping (or maximum) subsequence window size for which a matrix profile
-        may be computed. When `m_stop = Non`, this is set to the maximum allowable
+        may be computed. When `max_m = Non`, this is set to the maximum allowable
         subsequence window size
 
-    m_step : int, default 1
+    step : int, default 1
         The step between subsequence window sizes
 
     percentage : float, default 0.01
@@ -368,6 +422,14 @@ class stimp(_stimp):
     p : float, default 2.0
         The p-norm to apply for computing the Minkowski distance. This parameter is
         ignored when `normalize == True`.
+
+    T_subseq_isconstant_func : function, default None
+        A custom, user-defined function that returns a boolean array that indicates
+        whether a subsequence in `T` is constant (True). The function must only take
+        two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+        arguments may be specified by currying the user-defined function using
+        `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+        automatically have its corresponding value set to False in this boolean array.
 
     Attributes
     ----------
@@ -399,6 +461,8 @@ class stimp(_stimp):
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> pmp = stumpy.stimp(np.array([584., -11., 23., 79., 1001., 0., -19.]))
     >>> pmp.update()
     >>> pmp.PAN_
@@ -416,6 +480,7 @@ class stimp(_stimp):
         pre_scrump=True,
         normalize=True,
         p=2.0,
+        T_subseq_isconstant_func=None,
     ):
         """
         Initialize the `stimp` object and compute the Pan Matrix Profile
@@ -457,6 +522,15 @@ class stimp(_stimp):
         p : float, default 2.0
             The p-norm to apply for computing the Minkowski distance. This parameter is
             ignored when `normalize == True`.
+
+        T_subseq_isconstant_func : function, default None
+            A custom, user-defined function that returns a boolean array that indicates
+            whether a subsequence in `T` is constant (True). The function must only take
+            two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+            arguments may be specified by currying the user-defined function using
+            `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+            automatically have its corresponding value set to False in this boolean
+            array.
         """
         super().__init__(
             T,
@@ -466,41 +540,41 @@ class stimp(_stimp):
             percentage=percentage,
             pre_scrump=pre_scrump,
             mp_func=stump,
+            T_subseq_isconstant_func=T_subseq_isconstant_func,
         )
 
 
 @core.non_normalized(
     aamp_stimped,
-    exclude=["pre_scrump", "normalize", "p", "pre_scraamp"],
+    exclude=["pre_scrump", "normalize", "p", "T_subseq_isconstant_func", "pre_scraamp"],
     replace={"pre_scrump": "pre_scraamp"},
 )
 class stimped(_stimp):
     """
-    Compute the Pan Matrix Profile with a distributed dask cluster
+    Compute the Pan Matrix Profile with a distributed dask/ray cluster
 
     This is based on the SKIMP algorithm.
 
     Parameters
     ----------
-    dask_client : client
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
-            documentation.
+    client : client
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
+        documentation.
 
     T : numpy.ndarray
         The time series or sequence for which to compute the pan matrix profile
 
-    m_start : int, default 3
+    min_m : int, default 3
         The starting (or minimum) subsequence window size for which a matrix profile
         may be computed
 
-    m_stop : int, default None
+    max_m : int, default None
         The stopping (or maximum) subsequence window size for which a matrix profile
-        may be computed. When `m_stop = Non`, this is set to the maximum allowable
+        may be computed. When `max_m = Non`, this is set to the maximum allowable
         subsequence window size
 
-    m_step : int, default 1
+    step : int, default 1
         The step between subsequence window sizes
 
     normalize : bool, default True
@@ -511,6 +585,15 @@ class stimped(_stimp):
     p : float, default 2.0
         The p-norm to apply for computing the Minkowski distance. This parameter is
         ignored when `normalize == True`.
+
+    T_subseq_isconstant_func : function, default None
+            A custom, user-defined function that returns a boolean array that indicates
+            whether a subsequence in `T` is constant (True). The function must only take
+            two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+            arguments may be specified by currying the user-defined function using
+            `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+            automatically have its corresponding value set to False in this boolean
+            array.
 
     Attributes
     ----------
@@ -542,37 +625,39 @@ class stimped(_stimp):
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> from dask.distributed import Client
     >>> if __name__ == "__main__":
-    ...     dask_client = Client()
-    ...     pmp = stumpy.stimped(
-    ...         dask_client,
-    ...         np.array([584., -11., 23., 79., 1001., 0., -19.]))
-    ...     pmp.update()
-    ...     pmp.PAN_
+    ...     with Client() as dask_client:
+    ...         pmp = stumpy.stimped(
+    ...             dask_client,
+    ...             np.array([584., -11., 23., 79., 1001., 0., -19.]))
+    ...         pmp.update()
+    ...         pmp.PAN_
     array([[0., 1., 1., 1., 1., 1., 1.],
            [0., 1., 1., 1., 1., 1., 1.]])
     """
 
     def __init__(
         self,
-        dask_client,
+        client,
         T,
         min_m=3,
         max_m=None,
         step=1,
         normalize=True,
         p=2.0,
+        T_subseq_isconstant_func=None,
     ):
         """
         Initialize the `stimp` object and compute the Pan Matrix Profile
 
         Parameters
         ----------
-        dask_client : client
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
+        client : client
+            A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+            the scope of this library. Please refer to the Dask or Ray Distributed
             documentation.
 
         T : numpy.ndarray
@@ -599,6 +684,15 @@ class stimped(_stimp):
         p : float, default 2.0
             The p-norm to apply for computing the Minkowski distance. This parameter is
             ignored when `normalize == True`.
+
+        T_subseq_isconstant_func : function, default None
+            A custom, user-defined function that returns a boolean array that indicates
+            whether a subsequence in `T` is constant (True). The function must only take
+            two arguments, `a`, a 1-D array, and `w`, the window size, while additional
+            arguments may be specified by currying the user-defined function using
+            `functools.partial`. Any subsequence with at least one np.nan/np.inf will
+            automatically have its corresponding value set to False in this boolean
+            array.
         """
         super().__init__(
             T,
@@ -607,6 +701,7 @@ class stimped(_stimp):
             step=step,
             percentage=1.0,
             pre_scrump=False,
-            dask_client=dask_client,
+            client=client,
             mp_func=stumped,
+            T_subseq_isconstant_func=T_subseq_isconstant_func,
         )

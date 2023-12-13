@@ -1,14 +1,37 @@
+import functools
+import math
+import os
+from unittest.mock import patch
+
+import naive
 import numpy as np
 import numpy.testing as npt
 import pandas as pd
-from scipy.spatial.distance import cdist
-from stumpy import core, config
 import pytest
-from unittest.mock import patch
-import os
-import math
+from numba import cuda
+from scipy.spatial.distance import cdist
 
-import naive
+from stumpy import config, core, stump
+
+if cuda.is_available():
+
+    @cuda.jit("(f8[:, :], f8[:], i8[:], i8, b1, i8[:])")
+    def _gpu_searchsorted_kernel(a, v, bfs, nlevel, is_left, idx):
+        # A wrapper kernel for calling device function _gpu_searchsorted_left/right.
+        i = cuda.grid(1)
+        if i < a.shape[0]:
+            if is_left:
+                idx[i] = core._gpu_searchsorted_left(a[i], v[i], bfs, nlevel)
+            else:
+                idx[i] = core._gpu_searchsorted_right(a[i], v[i], bfs, nlevel)
+
+
+try:
+    from numba.errors import NumbaPerformanceWarning
+except ModuleNotFoundError:
+    from numba.core.errors import NumbaPerformanceWarning
+
+TEST_THREADS_PER_BLOCK = 10
 
 
 def naive_rolling_window_dot_product(Q, T):
@@ -40,11 +63,16 @@ def naive_compute_mean_std_multidimensional(T, m):
     return M_T, Σ_T
 
 
-def naive_idx_to_mp(I, T, m, normalize=True):
+def naive_idx_to_mp(I, T, m, normalize=True, p=2.0, T_subseq_isconstant=None):
     I = I.astype(np.int64)
     T = T.copy()
+
+    if normalize:
+        if T_subseq_isconstant is None:
+            T_subseq_isconstant = naive.rolling_isconstant(T, m)
+
     T_isfinite = np.isfinite(T)
-    T_subseqs_isfinite = np.all(core.rolling_window(T_isfinite, m), axis=1)
+    T_subseq_isfinite = np.all(core.rolling_window(T_isfinite, m), axis=1)
 
     T[~T_isfinite] = 0.0
     T_subseqs = core.rolling_window(T, m)
@@ -53,9 +81,17 @@ def naive_idx_to_mp(I, T, m, normalize=True):
         P = naive.distance(
             naive.z_norm(T_subseqs, axis=1), naive.z_norm(nn_subseqs, axis=1), axis=1
         )
+        for i, nn_i in enumerate(I):
+            if T_subseq_isconstant[i] and T_subseq_isconstant[nn_i]:
+                P[i] = 0
+            elif T_subseq_isconstant[i] or T_subseq_isconstant[nn_i]:
+                P[i] = np.sqrt(m)
+            else:  # pragma: no cover
+                pass
     else:
-        P = naive.distance(T_subseqs, nn_subseqs, axis=1)
-    P[~T_subseqs_isfinite] = np.inf
+        P = naive.distance(T_subseqs, nn_subseqs, axis=1, p=p)
+
+    P[~T_subseq_isfinite] = np.inf
     P[I < 0] = np.inf
 
     return P
@@ -222,6 +258,35 @@ def test_welford_nanstd():
     npt.assert_almost_equal(ref_var, comp_var)
 
 
+def test_rolling_std_1d():
+    a = np.random.rand(64)
+    for w in range(3, 6):
+        ref_std = naive.rolling_nanstd(a, w)
+
+        # welford = False (default)
+        comp_std = core.rolling_nanstd(a, w)
+        npt.assert_almost_equal(ref_std, comp_std)
+
+        # welford = True
+        comp_std = core.rolling_nanstd(a, w, welford=True)
+        npt.assert_almost_equal(ref_std, comp_std)
+
+
+def test_rolling_std_2d():
+    w = 5
+    for n_rows in range(1, 4):
+        a = np.random.rand(n_rows * 64).reshape(n_rows, 64)
+        ref_std = naive.rolling_nanstd(a, w)
+
+        # welford = False (default)
+        comp_std = core.rolling_nanstd(a, w)
+        npt.assert_almost_equal(ref_std, comp_std)
+
+        # welford = True
+        comp_std = core.rolling_nanstd(a, w, welford=True)
+        npt.assert_almost_equal(ref_std, comp_std)
+
+
 def test_rolling_nanmin_1d():
     T = np.random.rand(64)
     for m in range(1, 12):
@@ -382,11 +447,23 @@ def test_calculate_squared_distance_profile(Q, T):
         )
         ** 2
     )
+
     QT = core.sliding_dot_product(Q, T)
-    μ_Q, σ_Q = core.compute_mean_std(Q, m)
+    Q_subseq_isconstant = core.rolling_isconstant(Q, m)[0]
+    μ_Q, σ_Q = [arr[0] for arr in core.compute_mean_std(Q, m)]
+
+    T_subseq_isconstant = core.rolling_isconstant(T, m)
     M_T, Σ_T = core.compute_mean_std(T, m)
+
     comp = core._calculate_squared_distance_profile(
-        m, QT, μ_Q.item(0), σ_Q.item(0), M_T, Σ_T
+        m,
+        QT,
+        μ_Q,
+        σ_Q,
+        M_T,
+        Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
     )
     npt.assert_almost_equal(ref, comp)
 
@@ -397,10 +474,24 @@ def test_calculate_distance_profile(Q, T):
     ref = np.linalg.norm(
         core.z_norm(core.rolling_window(T, m), 1) - core.z_norm(Q), axis=1
     )
+
     QT = core.sliding_dot_product(Q, T)
-    μ_Q, σ_Q = core.compute_mean_std(Q, m)
+    Q_subseq_isconstant = core.rolling_isconstant(Q, m)[0]
+    μ_Q, σ_Q = [arr[0] for arr in core.compute_mean_std(Q, m)]
+
+    T_subseq_isconstant = core.rolling_isconstant(T, m)
     M_T, Σ_T = core.compute_mean_std(T, m)
-    comp = core.calculate_distance_profile(m, QT, μ_Q.item(0), σ_Q.item(0), M_T, Σ_T)
+
+    comp = core.calculate_distance_profile(
+        m,
+        QT,
+        μ_Q,
+        σ_Q,
+        M_T,
+        Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
+    )
     npt.assert_almost_equal(ref, comp)
 
 
@@ -510,7 +601,7 @@ def test_p_norm_distance_profile(Q, T):
 
 
 @pytest.mark.parametrize("Q, T", test_data)
-def test_mass_asbolute(Q, T):
+def test_mass_absolute(Q, T):
     Q = Q.copy()
     T = T.copy()
     m = Q.shape[0]
@@ -744,20 +835,23 @@ def test_preprocess():
     m = 3
 
     ref_T = np.array([0, 0, 2, 3, 4, 5, 6, 7, 0, 9], dtype=float)
+    ref_subseq_isconstant = naive.rolling_isconstant(T, m)
     ref_M, ref_Σ = naive.compute_mean_std(T, m)
 
-    comp_T, comp_M, comp_Σ = core.preprocess(T, m)
+    comp_T, comp_M, comp_Σ, comp_subseq_isconstant = core.preprocess(T, m)
 
     npt.assert_almost_equal(ref_T, comp_T)
     npt.assert_almost_equal(ref_M, comp_M)
     npt.assert_almost_equal(ref_Σ, comp_Σ)
+    npt.assert_almost_equal(ref_subseq_isconstant, comp_subseq_isconstant)
 
     T = pd.Series(T)
-    comp_T, comp_M, comp_Σ = core.preprocess(T, m)
+    comp_T, comp_M, comp_Σ, comp_subseq_isconstant = core.preprocess(T, m)
 
     npt.assert_almost_equal(ref_T, comp_T)
     npt.assert_almost_equal(ref_M, comp_M)
     npt.assert_almost_equal(ref_Σ, comp_Σ)
+    npt.assert_almost_equal(ref_subseq_isconstant, comp_subseq_isconstant)
 
 
 def test_preprocess_non_normalized():
@@ -940,6 +1034,25 @@ def test_rolling_isfinite():
 
     npt.assert_almost_equal(ref, comp)
 
+    # test `a` as all boolean isfinite array
+    comp = core.rolling_isfinite(np.isfinite(a), w)
+    npt.assert_almost_equal(ref, comp)
+
+
+def test_rolling_isconstant():
+    a = np.arange(12).astype(np.float64)
+    w = 3
+
+    a[:3] = 77.0
+    a[1] = np.inf
+    a[4:7] = 77.0
+    a[9:12] = [77.0, np.nan, 77.0]
+
+    ref = naive.rolling_isconstant(a, w)
+    comp = core.rolling_isconstant(a, w)
+
+    npt.assert_almost_equal(ref, comp)
+
 
 def test_compare_parameters():
     assert (
@@ -975,13 +1088,13 @@ def test_jagged_list_to_array_empty():
 
 
 def test_get_mask_slices():
-    bool_lst = [False, True]
+    bool_list = [False, True]
     mask_cases = [
         [x, y, z, w]
-        for x in bool_lst
-        for y in bool_lst
-        for z in bool_lst
-        for w in bool_lst
+        for x in bool_list
+        for y in bool_list
+        for z in bool_list
+        for w in bool_list
     ]
 
     for mask in mask_cases:
@@ -997,15 +1110,25 @@ def test_idx_to_mp():
     # T[1] = np.nan
     # T[8] = np.inf
     # T[:] = 1.0
-    I = np.random.randint(0, n - m + 1, n - m + 1)
+    l = n - m + 1
+    I = np.random.randint(0, l, l)
 
+    # `normalize == True` and `T_subseq_isconstant` is None (default)
     ref_mp = naive_idx_to_mp(I, T, m)
     cmp_mp = core._idx_to_mp(I, T, m)
     npt.assert_almost_equal(ref_mp, cmp_mp)
 
-    ref_mp = naive_idx_to_mp(I, T, m, normalize=False)
-    cmp_mp = core._idx_to_mp(I, T, m, normalize=False)
+    # `normalize == True` and `T_subseq_isconstant` is provided
+    T_subseq_isconstant = np.random.choice([True, False], l, replace=True)
+    ref_mp = naive_idx_to_mp(I, T, m, T_subseq_isconstant=T_subseq_isconstant)
+    cmp_mp = core._idx_to_mp(I, T, m, T_subseq_isconstant=T_subseq_isconstant)
     npt.assert_almost_equal(ref_mp, cmp_mp)
+
+    # `normalize == False`
+    for p in range(1, 4):
+        ref_mp = naive_idx_to_mp(I, T, m, normalize=False, p=p)
+        cmp_mp = core._idx_to_mp(I, T, m, normalize=False, p=p)
+        npt.assert_almost_equal(ref_mp, cmp_mp)
 
 
 def test_total_diagonal_ndists():
@@ -1316,7 +1439,7 @@ def test_shift_insert_at_index():
         values = np.random.rand(k + 1)
 
         # test shift = "right"
-        for (idx, v) in zip(indices, values):
+        for idx, v in zip(indices, values):
             ref[:] = a
             comp[:] = a
 
@@ -1328,7 +1451,7 @@ def test_shift_insert_at_index():
             npt.assert_almost_equal(ref, comp)
 
         # test shift = "left"
-        for (idx, v) in zip(indices, values):
+        for idx, v in zip(indices, values):
             ref[:] = a
             comp[:] = a
 
@@ -1365,3 +1488,268 @@ def test_find_matches_maxmatch():
         comp = core._find_matches(D, excl_zone, max_distance, max_matches)
 
         npt.assert_almost_equal(ref, comp)
+
+
+@pytest.mark.filterwarnings("ignore", category=NumbaPerformanceWarning)
+@patch("stumpy.config.STUMPY_THREADS_PER_BLOCK", TEST_THREADS_PER_BLOCK)
+def test_gpu_searchsorted():
+    if not cuda.is_available():  # pragma: no cover
+        pytest.skip("Skipping Tests No GPUs Available")
+
+    n = 3 * config.STUMPY_THREADS_PER_BLOCK + 1
+    V = np.empty(n, dtype=np.float64)
+
+    threads_per_block = config.STUMPY_THREADS_PER_BLOCK
+    blocks_per_grid = math.ceil(n / threads_per_block)
+
+    for k in range(1, 32):
+        device_bfs = cuda.to_device(core._bfs_indices(k, fill_value=-1))
+        nlevel = np.floor(np.log2(k) + 1).astype(np.int64)
+
+        A = np.sort(np.random.rand(n, k), axis=1)
+        device_A = cuda.to_device(A)
+
+        V[:] = np.random.rand(n)
+        for i, idx in enumerate(np.random.choice(np.arange(n), size=k, replace=False)):
+            V[idx] = A[idx, i]  # create ties
+        device_V = cuda.to_device(V)
+
+        is_left = True  # test case
+        ref_IDX = [np.searchsorted(A[i], V[i], side="left") for i in range(n)]
+        ref_IDX = np.asarray(ref_IDX, dtype=np.int64)
+
+        comp_IDX = np.full(n, -1, dtype=np.int64)
+        device_comp_IDX = cuda.to_device(comp_IDX)
+        _gpu_searchsorted_kernel[blocks_per_grid, threads_per_block](
+            device_A, device_V, device_bfs, nlevel, is_left, device_comp_IDX
+        )
+        comp_IDX = device_comp_IDX.copy_to_host()
+        npt.assert_array_equal(ref_IDX, comp_IDX)
+
+        is_left = False  # test case
+        ref_IDX = [np.searchsorted(A[i], V[i], side="right") for i in range(n)]
+        ref_IDX = np.asarray(ref_IDX, dtype=np.int64)
+
+        comp_IDX = np.full(n, -1, dtype=np.int64)
+        device_comp_IDX = cuda.to_device(comp_IDX)
+        _gpu_searchsorted_kernel[blocks_per_grid, threads_per_block](
+            device_A, device_V, device_bfs, nlevel, is_left, device_comp_IDX
+        )
+        comp_IDX = device_comp_IDX.copy_to_host()
+        npt.assert_array_equal(ref_IDX, comp_IDX)
+
+
+def test_client_to_func():
+    with pytest.raises(NotImplementedError):
+        core._client_to_func(core)
+
+
+def test_apply_include():
+    D = np.random.uniform(-1000, 1000, [10, 20]).astype(np.float64)
+    ref_D = np.empty(D.shape)
+    comp_D = np.empty(D.shape)
+    for width in range(D.shape[0]):
+        for i in range(D.shape[0] - width):
+            ref_D[:, :] = D[:, :]
+            comp_D[:, :] = D[:, :]
+            include = np.asarray(range(i, i + width + 1))
+
+            naive.apply_include(D, include)
+            core._apply_include(D, include)
+
+            npt.assert_almost_equal(ref_D, comp_D)
+
+
+@pytest.mark.parametrize("T_A, T_B", test_data)
+def test_mpdist_custom_func(T_A, T_B):
+    m = 3
+
+    percentage = 0.05
+    n_A = T_A.shape[0]
+    n_B = T_B.shape[0]
+
+    ref_mpdist = naive.mpdist(T_A, T_B, m)
+
+    partial_stump = functools.partial(stump)
+    partial_k_func = functools.partial(
+        naive.mpdist_custom_func, m=m, percentage=percentage, n_A=n_A, n_B=n_B
+    )
+    comp_mpdist = core._mpdist(T_A, T_B, m, partial_stump, custom_func=partial_k_func)
+
+    npt.assert_almost_equal(ref_mpdist, comp_mpdist)
+
+
+@pytest.mark.parametrize("T_A, T_B", test_data)
+def test_mpdist_with_isconstant(T_A, T_B):
+    isconstant_custom_func = functools.partial(
+        naive.isconstant_func_stddev_threshold, quantile_threshold=0.05
+    )
+
+    m = 3
+    T_A_subseq_isconstant = isconstant_custom_func
+    T_B_subseq_isconstant = isconstant_custom_func
+
+    ref_mpdist = naive.mpdist(
+        T_A,
+        T_B,
+        m,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
+    )
+
+    partial_stump = functools.partial(
+        stump,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
+    )
+    comp_mpdist = core._mpdist(T_A, T_B, m, partial_stump)
+
+    npt.assert_almost_equal(ref_mpdist, comp_mpdist)
+
+
+@pytest.mark.parametrize("T_A, T_B", test_data)
+def test_compute_P_ABBA(T_A, T_B):
+    m = 3
+    n_A = T_A.shape[0]
+    n_B = T_B.shape[0]
+    ref_P_ABBA = np.empty(n_A - m + 1 + n_B - m + 1, dtype=np.float64)
+    comp_P_ABBA = np.empty(n_A - m + 1 + n_B - m + 1, dtype=np.float64)
+
+    ref_P_ABBA[: n_A - m + 1] = naive.stump(T_A, m, T_B)[:, 0]
+    ref_P_ABBA[n_A - m + 1 :] = naive.stump(T_B, m, T_A)[:, 0]
+
+    partial_stump = functools.partial(stump)
+    core._compute_P_ABBA(T_A, T_B, m, comp_P_ABBA, partial_stump)
+
+    npt.assert_almost_equal(ref_P_ABBA, comp_P_ABBA)
+
+
+@pytest.mark.parametrize("T_A, T_B", test_data)
+def test_compute_P_ABBA_with_isconstant(T_A, T_B):
+    isconstant_custom_func = functools.partial(
+        naive.isconstant_func_stddev_threshold, quantile_threshold=0.05
+    )
+
+    m = 3
+    n_A = T_A.shape[0]
+    n_B = T_B.shape[0]
+
+    T_A_subseq_isconstant = isconstant_custom_func
+    T_B_subseq_isconstant = isconstant_custom_func
+
+    ref_P_ABBA = np.empty(n_A - m + 1 + n_B - m + 1, dtype=np.float64)
+    comp_P_ABBA = np.empty(n_A - m + 1 + n_B - m + 1, dtype=np.float64)
+
+    ref_P_ABBA[: n_A - m + 1] = naive.stump(
+        T_A,
+        m,
+        T_B,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
+    )[:, 0]
+    ref_P_ABBA[n_A - m + 1 :] = naive.stump(
+        T_B,
+        m,
+        T_A,
+        T_A_subseq_isconstant=T_B_subseq_isconstant,
+        T_B_subseq_isconstant=T_A_subseq_isconstant,
+    )[:, 0]
+
+    mp_func = functools.partial(
+        stump,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
+    )
+    core._compute_P_ABBA(
+        T_A,
+        T_B,
+        m,
+        comp_P_ABBA,
+        mp_func,
+    )
+
+    npt.assert_almost_equal(ref_P_ABBA, comp_P_ABBA)
+
+
+def test_process_isconstant_1d():
+    isconstant_custom_func = functools.partial(
+        naive.isconstant_func_stddev_threshold, quantile_threshold=0.05
+    )
+
+    n = 64
+    m = 8
+
+    # case 1: without nan
+    T = np.random.rand(n)
+
+    T_subseq_isconstant_ref = naive.rolling_isconstant(T, m, isconstant_custom_func)
+    T_subseq_isconstant_comp = core.process_isconstant(T, m, isconstant_custom_func)
+
+    npt.assert_array_equal(T_subseq_isconstant_ref, T_subseq_isconstant_comp)
+
+    # case 2: with nan
+    T = np.random.rand(n)
+    idx = np.random.randint(n)
+    T[idx] = np.nan
+    T_subseq_isconstant = np.random.choice([True, False], n - m + 1, replace=True)
+
+    T_subseq_isfinite = core.rolling_isfinite(T, m)
+
+    T_subseq_isconstant_ref = T_subseq_isconstant & T_subseq_isfinite
+    T_subseq_isconstant_comp = core.process_isconstant(T, m, T_subseq_isconstant)
+
+    npt.assert_array_equal(T_subseq_isconstant_ref, T_subseq_isconstant_comp)
+
+
+def test_process_isconstant_2d():
+    isconstant_custom_func = functools.partial(
+        naive.isconstant_func_stddev_threshold, quantile_threshold=0.05
+    )
+
+    n = 64
+    m = 8
+    d = 3
+
+    # case 1: without nan
+    T = np.random.rand(d, n)
+    T_subseq_isconstant = [
+        None,
+        isconstant_custom_func,
+        np.random.choice([True, False], n - m + 1, replace=True),
+    ]
+
+    T_subseq_isconstant_ref = np.array(
+        [naive.rolling_isconstant(T[i], m, T_subseq_isconstant[i]) for i in range(d)]
+    )
+
+    T_subseq_isconstant_comp = core.process_isconstant(T, m, T_subseq_isconstant)
+
+    npt.assert_array_equal(T_subseq_isconstant_ref, T_subseq_isconstant_comp)
+
+    # case 2: with nan
+    T = np.random.rand(d, n)
+    i, j = np.random.choice(np.arange(n - m + 1), size=2, replace=False)
+    T[-1, i : i + m] = 0.0
+    T[-1, j : j + m] = 0.0
+    T[-1, j] = np.nan
+
+    T_subseq_isconstant = [
+        None,
+        isconstant_custom_func,
+        np.full(n - m + 1, 0, dtype=bool),
+    ]
+    T_subseq_isconstant[-1][i] = True
+    T_subseq_isconstant[-1][j] = True
+    # Although T_subseq_isconstant[-1, j] should be set to False (since...
+    # the subquence `T[-1, j:j+m]` is not finte), it is intentially set
+    # to True to test the functionality of `process_isconstant` in handling
+    # such conflict.
+
+    T_subseq_isconstant_ref = np.array(
+        [naive.rolling_isconstant(T[i], m, T_subseq_isconstant[i]) for i in range(d)]
+    )
+    T_subseq_isconstant_ref = T_subseq_isconstant_ref & core.rolling_isfinite(T, m)
+
+    T_subseq_isconstant_comp = core.process_isconstant(T, m, T_subseq_isconstant)
+
+    npt.assert_array_equal(T_subseq_isconstant_ref, T_subseq_isconstant_comp)

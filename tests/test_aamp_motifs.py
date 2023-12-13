@@ -1,10 +1,9 @@
+import naive
 import numpy as np
 import numpy.testing as npt
 import pytest
 
-from stumpy import core, aamp_motifs, aamp_match
-
-import naive
+from stumpy import aamp_match, aamp_motifs, core
 
 test_data = [
     (
@@ -146,7 +145,7 @@ def test_aamp_naive_match_exact():
                 max_distance=0.001,  # Small max_distance as matches are identical
             )
         )
-        # To avoid sorting errors we first sort based on disance and then based on
+        # To avoid sorting errors we first sort based on distance and then based on
         # indices
         right.sort(key=lambda x: (x[1], x[0]))
 
@@ -180,7 +179,7 @@ def test_aamp_naive_match_exclusion_zone():
                 max_distance=0.2,
             )
         )
-        # To avoid sorting errors we first sort based on disance and then based on
+        # To avoid sorting errors we first sort based on distance and then based on
         # indices
         right.sort(key=lambda x: (x[0], x[1]))
 

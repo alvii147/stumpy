@@ -1,10 +1,9 @@
+import naive
 import numpy as np
 import numpy.testing as npt
-import naive
 import pytest
 
-from stumpy import config, aamp_mmotifs
-
+from stumpy import aamp_mmotifs, config
 
 test_data = [
     np.array(
@@ -51,7 +50,6 @@ test_data = [
 
 
 def test_aamp_mmotifs_default_parameters():
-
     motif_distances_ref = np.array(
         [[0.0, 0.06315749, 0.25275899, 0.34087884, 0.3452315]]
     )
@@ -82,7 +80,6 @@ def test_aamp_mmotifs_default_parameters():
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_max_distance(T):
-
     motif_distances_ref = np.array(
         [[0.0, 1.41421356, 4.46430286, 6.85346628, 8.207923, 8.50529247]]
     )
@@ -108,7 +105,6 @@ def test_aamp_mmotifs_max_distance(T):
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_max_distance_max_matches_none(T):
-
     motif_distances_ref = np.array(
         [[0.0, 1.41421356, 4.46430286, 6.85346628, 8.207923, 8.50529247]]
     )
@@ -134,7 +130,6 @@ def test_aamp_mmotifs_max_distance_max_matches_none(T):
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_max_motifs_1_max_matches_2_k_1(T):
-
     motif_distances_ref = np.array([[0.0, 2.87778559]])
     motif_indices_ref = np.array([[0, 5]])
     motif_subspaces_ref = [np.array([2, 1])]
@@ -158,7 +153,6 @@ def test_aamp_mmotifs_max_motifs_1_max_matches_2_k_1(T):
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_more_motif_pairs_cutoffs_3(T):
-
     motif_distances_ref = np.array([[0.0, 1.41421356], [0.0, 2.06639783]])
     motif_indices_ref = np.array([[2, 9], [0, 5]])
     motif_subspaces_ref = [np.array([3]), np.array([2])]
@@ -187,7 +181,6 @@ def test_aamp_mmotifs_more_motif_pairs_cutoffs_3(T):
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_more_motif_pairs_cutoffs_as_list(T):
-
     motif_distances_ref = np.array([[0.0, 1.41421356]])
     motif_indices_ref = np.array([[2, 9]])
     motif_subspaces_ref = [np.array([3])]
@@ -214,7 +207,6 @@ def test_aamp_mmotifs_more_motif_pairs_cutoffs_as_list(T):
 
 @pytest.mark.parametrize("T", test_data)
 def test_aamp_mmotifs_two_motif_pairs_max_motifs_2(T):
-
     motif_distances_ref = np.array([[0.0, 1.41421356], [0.0, 2.06639783]])
     motif_indices_ref = np.array([[2, 9], [0, 5]])
     motif_subspaces_ref = [np.array([3]), np.array([2])]

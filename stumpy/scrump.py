@@ -2,19 +2,18 @@
 # Copyright 2019 TD Ameritrade. Released under the terms of the 3-Clause BSD license.
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
-import logging
-
+import numba
 import numpy as np
 from numba import njit, prange
-import numba
 
-from . import core, scraamp, config
+from . import config, core
+from .scraamp import prescraamp, scraamp
 from .stump import _stump
 
-logger = logging.getLogger(__name__)
 
-
-def _preprocess_prescrump(T_A, m, T_B=None, s=None):
+def _preprocess_prescrump(
+    T_A, m, T_B=None, s=None, T_A_subseq_isconstant=None, T_B_subseq_isconstant=None
+):
     """
     Performs several preprocessings and returns outputs that are needed for the
     prescrump algorithm.
@@ -34,6 +33,26 @@ def _preprocess_prescrump(T_A, m, T_B=None, s=None):
     s : int, default None
         The sampling interval that defaults to
         `int(np.ceil(m / config.STUMPY_EXCL_ZONE_DENOM))`
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -58,6 +77,12 @@ def _preprocess_prescrump(T_A, m, T_B=None, s=None):
     Σ_T : numpy.ndarray
         Sliding window standard deviation for `T_B`
 
+    Q_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether the subsequence in `Q` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
     indices : numpy.ndarray
         The subsequence indices to compute `prescrump` for
 
@@ -70,12 +95,17 @@ def _preprocess_prescrump(T_A, m, T_B=None, s=None):
     """
     if T_B is None:
         T_B = T_A
+        T_B_subseq_isconstant = T_A_subseq_isconstant
         excl_zone = int(np.ceil(m / config.STUMPY_EXCL_ZONE_DENOM))
     else:
         excl_zone = None
 
-    T_A, μ_Q, σ_Q = core.preprocess(T_A, m)
-    T_B, M_T, Σ_T = core.preprocess(T_B, m)
+    T_A, μ_Q, σ_Q, Q_subseq_isconstant = core.preprocess(
+        T_A, m, T_subseq_isconstant=T_A_subseq_isconstant
+    )
+    T_B, M_T, Σ_T, T_subseq_isconstant = core.preprocess(
+        T_B, m, T_subseq_isconstant=T_B_subseq_isconstant
+    )
 
     n_A = T_A.shape[0]
     l = n_A - m + 1
@@ -88,7 +118,19 @@ def _preprocess_prescrump(T_A, m, T_B=None, s=None):
 
     indices = np.random.permutation(range(0, l, s)).astype(np.int64)
 
-    return (T_A, T_B, μ_Q, σ_Q, M_T, Σ_T, indices, s, excl_zone)
+    return (
+        T_A,
+        T_B,
+        μ_Q,
+        σ_Q,
+        M_T,
+        Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
+        indices,
+        s,
+        excl_zone,
+    )
 
 
 @njit(fastmath=True)
@@ -100,6 +142,8 @@ def _compute_PI(
     σ_Q,
     M_T,
     Σ_T,
+    Q_subseq_isconstant,
+    T_subseq_isconstant,
     indices,
     start,
     stop,
@@ -137,6 +181,12 @@ def _compute_PI(
 
     Σ_T : numpy.ndarray
         Sliding window standard deviation for `T_B`
+
+    Q_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T_A` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T_B` is constant (True)
 
     indices : numpy.ndarray
         The subsequence indices to compute `prescrump` for
@@ -186,12 +236,24 @@ def _compute_PI(
     for i in indices[start:stop]:
         Q = T_A[i : i + m]
         QT[:] = core._sliding_dot_product(Q, T_B)
-        squared_distance_profile[:] = core._mass(Q, T_B, QT, μ_Q[i], σ_Q[i], M_T, Σ_T)
-        squared_distance_profile[:] = np.square(squared_distance_profile)
+        squared_distance_profile[:] = core._calculate_squared_distance_profile(
+            m,
+            QT,
+            μ_Q[i],
+            σ_Q[i],
+            M_T,
+            Σ_T,
+            Q_subseq_isconstant[i],
+            T_subseq_isconstant,
+        )
+
         if excl_zone is not None:
             core._apply_exclusion_zone(squared_distance_profile, i, excl_zone, np.inf)
 
         nn_i = np.argmin(squared_distance_profile)
+        if squared_distance_profile[nn_i] == np.inf:
+            continue
+
         if (
             squared_distance_profile[nn_i] < P_squared[thread_idx, i, -1]
             and nn_i not in I[thread_idx, i]
@@ -206,15 +268,8 @@ def _compute_PI(
             )
             core._shift_insert_at_index(I[thread_idx, i], idx, nn_i)
 
-        if P_squared[thread_idx, i, 0] == np.inf:  # pragma: no cover
-            I[thread_idx, i, 0] = -1
-            continue
-
         j = nn_i
-        # Given the squared distance, work backwards and compute QT
-        QT_j = (m - P_squared[thread_idx, i, 0] / 2.0) * (Σ_T[j] * σ_Q[i]) + (
-            m * M_T[j] * μ_Q[i]
-        )
+        QT_j = QT[j]
         QT_j_prime = QT_j
         # Update top-k for both subsequences `S[i+g] = T[i+g:i+g+m]`` and
         # `S[j+g] = T[j+g:j+g+m]` (i.e., the right neighbors of `T[i : i+m]` and
@@ -232,6 +287,8 @@ def _compute_PI(
                 Σ_T[j + g],
                 μ_Q[i + g],
                 σ_Q[i + g],
+                T_subseq_isconstant[j + g],
+                Q_subseq_isconstant[i + g],
             )
             if (
                 D_squared < P_squared[thread_idx, i + g, -1]
@@ -271,6 +328,8 @@ def _compute_PI(
                 Σ_T[j - g],
                 μ_Q[i - g],
                 σ_Q[i - g],
+                T_subseq_isconstant[j - g],
+                Q_subseq_isconstant[i - g],
             )
             if (
                 D_squared < P_squared[thread_idx, i - g, -1]
@@ -335,6 +394,8 @@ def _prescrump(
     σ_Q,
     M_T,
     Σ_T,
+    Q_subseq_isconstant,
+    T_subseq_isconstant,
     indices,
     s,
     excl_zone=None,
@@ -367,23 +428,18 @@ def _prescrump(
     Σ_T : numpy.ndarray
         Sliding window standard deviation for `T_B`
 
+    Q_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T_A` is constant (True)
+
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T_B` is constant (True)
 
     indices : numpy.ndarray
         The subsequence indices to compute `prescrump` for
 
-    idx_ranges : numpy.ndarray
-        The (inclusive) start indices and (exclusive) stop indices referenced
-        in the `indices` array
-
     s : int
         The sampling interval that defaults to
         `int(np.ceil(m / config.STUMPY_EXCL_ZONE_DENOM))`
-
-    P_squared : numpy.ndarray
-        The squared matrix profile
-
-    I : numpy.ndarray
-        The matrix profile indices
 
     excl_zone : int
         The half width for the exclusion zone relative to the `i`.
@@ -428,6 +484,8 @@ def _prescrump(
             σ_Q,
             M_T,
             Σ_T,
+            Q_subseq_isconstant,
+            T_subseq_isconstant,
             indices,
             idx_ranges[thread_idx, 0],
             idx_ranges[thread_idx, 1],
@@ -445,8 +503,18 @@ def _prescrump(
     return np.sqrt(P_squared[0]), I[0]
 
 
-@core.non_normalized(scraamp.prescraamp)
-def prescrump(T_A, m, T_B=None, s=None, normalize=True, p=2.0, k=1):
+@core.non_normalized(prescraamp)
+def prescrump(
+    T_A,
+    m,
+    T_B=None,
+    s=None,
+    normalize=True,
+    p=2.0,
+    k=1,
+    T_A_subseq_isconstant=None,
+    T_B_subseq_isconstant=None,
+):
     """
     A convenience wrapper around the Numba JIT-compiled parallelized
     `_prescrump` function which computes the approximate (top-k) matrix
@@ -474,13 +542,35 @@ def prescrump(T_A, m, T_B=None, s=None, normalize=True, p=2.0, k=1):
         equivalent set in the `@core.non_normalized` function decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
 
     k : int, default 1
         The number of top `k` smallest distances used to construct the matrix profile.
         Note that this will increase the total computational time and memory usage
         when k > 1.
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -502,8 +592,25 @@ def prescrump(T_A, m, T_B=None, s=None, normalize=True, p=2.0, k=1):
 
     See Algorithm 2
     """
-    T_A, T_B, μ_Q, σ_Q, M_T, Σ_T, indices, s, excl_zone = _preprocess_prescrump(
-        T_A, m, T_B=T_B, s=s
+    (
+        T_A,
+        T_B,
+        μ_Q,
+        σ_Q,
+        M_T,
+        Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
+        indices,
+        s,
+        excl_zone,
+    ) = _preprocess_prescrump(
+        T_A,
+        m,
+        T_B=T_B,
+        s=s,
+        T_A_subseq_isconstant=T_A_subseq_isconstant,
+        T_B_subseq_isconstant=T_B_subseq_isconstant,
     )
 
     P, I = _prescrump(
@@ -514,6 +621,8 @@ def prescrump(T_A, m, T_B=None, s=None, normalize=True, p=2.0, k=1):
         σ_Q,
         M_T,
         Σ_T,
+        Q_subseq_isconstant,
+        T_subseq_isconstant,
         indices,
         s,
         excl_zone,
@@ -527,8 +636,15 @@ def prescrump(T_A, m, T_B=None, s=None, normalize=True, p=2.0, k=1):
 
 
 @core.non_normalized(
-    scraamp.scraamp,
-    exclude=["normalize", "pre_scrump", "pre_scraamp", "p"],
+    scraamp,
+    exclude=[
+        "normalize",
+        "pre_scrump",
+        "pre_scraamp",
+        "p",
+        "T_A_subseq_isconstant",
+        "T_B_subseq_isconstant",
+    ],
     replace={"pre_scrump": "pre_scraamp"},
 )
 class scrump:
@@ -574,13 +690,35 @@ class scrump:
         equivalent set in the `@core.non_normalized` class decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
 
     k : int, default 1
         The number of top `k` smallest distances used to construct the matrix profile.
         Note that this will increase the total computational time and memory usage
         when k > 1.
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Attributes
     ----------
@@ -629,22 +767,16 @@ class scrump:
 
     Examples
     --------
+    >>> import stumpy
+    >>> import numpy as np
     >>> approx_mp = stumpy.scrump(
     ...     np.array([584., -11., 23., 79., 1001., 0., -19.]),
     ...     m=3)
     >>> approx_mp.update()
-    >>> approx_mp._P
-    array([[2.982409  ,        inf, 2.982409  ],
-           [3.28412702,        inf, 3.28412702],
-           [       inf,        inf,        inf],
-           [2.982409  , 2.982409  ,        inf],
-           [3.28412702, 3.28412702,        inf]])
-    >>> approx_mp._I
-    array([[ 3, -1,  3],
-           [ 4, -1,  4],
-           [-1, -1, -1],
-           [ 0,  0, -1],
-           [ 1,  1, -1]])
+    >>> approx_mp.P_
+    array([2.982409  , 3.28412702,        inf, 2.982409  , 3.28412702])
+    >>> approx_mp.I_
+    array([ 3,  4, -1,  0,  1])
     """
 
     def __init__(
@@ -659,6 +791,8 @@ class scrump:
         normalize=True,
         p=2.0,
         k=1,
+        T_A_subseq_isconstant=None,
+        T_B_subseq_isconstant=None,
     ):
         """
         Initialize the `scrump` object
@@ -699,19 +833,42 @@ class scrump:
             non-normalized equivalent set in the `@core.non_normalized` class decorator.
 
         p : float, default 2.0
-            The p-norm to apply for computing the Minkowski distance. This parameter is
-            ignored when `normalize == True`.
+            The p-norm to apply for computing the Minkowski distance. Minkowski distance
+            is typically used with `p` being 1 or 2, which correspond to the Manhattan
+            distance and the Euclidean distance, respectively.This parameter is ignored
+            when `normalize == True`.
 
         k : int, default 1
             The number of top `k` smallest distances used to construct the matrix
             profile. Note that this will increase the total computational time and
             memory usage when k > 1.
+
+        T_A_subseq_isconstant : numpy.ndarray or function, default None
+            A boolean array that indicates whether a subsequence in `T_A` is constant
+            (True). Alternatively, a custom, user-defined function that returns a
+            boolean array that indicates whether a subsequence in `T_A` is constant
+            (True). The function must only take two arguments, `a`, a 1-D array,
+            and `w`, the window size, while additional arguments may be specified
+            by currying the user-defined function using `functools.partial`. Any
+            subsequence with at least one np.nan/np.inf will automatically have its
+            corresponding value set to False in this boolean array.
+
+        T_B_subseq_isconstant : numpy.ndarray or function, default None
+            A boolean array that indicates whether a subsequence in `T_B` is constant
+            (True). Alternatively, a custom, user-defined function that returns a
+            boolean array that indicates whether a subsequence in `T_B` is constant
+            (True). The function must only take two arguments, `a`, a 1-D array,
+            and `w`, the window size, while additional arguments may be specified
+            by currying the user-defined function using `functools.partial`. Any
+            subsequence with at least one np.nan/np.inf will automatically have its
+            corresponding value set to False in this boolean array.
         """
         self._ignore_trivial = ignore_trivial
 
         if T_B is None:
             T_B = T_A
             self._ignore_trivial = True
+            T_B_subseq_isconstant = T_A_subseq_isconstant
 
         self._m = m
         (
@@ -719,18 +876,22 @@ class scrump:
             self._μ_Q,
             self._σ_Q_inverse,
             self._μ_Q_m_1,
-            self._T_A_subseq_isfinite,
-            self._T_A_subseq_isconstant,
-        ) = core.preprocess_diagonal(T_A, self._m)
+            self._Q_subseq_isfinite,
+            self._Q_subseq_isconstant,
+        ) = core.preprocess_diagonal(
+            T_A, self._m, T_subseq_isconstant=T_A_subseq_isconstant
+        )
 
         (
             self._T_B,
             self._M_T,
             self._Σ_T_inverse,
             self._M_T_m_1,
-            self._T_B_subseq_isfinite,
-            self._T_B_subseq_isconstant,
-        ) = core.preprocess_diagonal(T_B, self._m)
+            self._T_subseq_isfinite,
+            self._T_subseq_isconstant,
+        ) = core.preprocess_diagonal(
+            T_B, self._m, T_subseq_isconstant=T_B_subseq_isconstant
+        )
 
         if self._T_A.ndim != 1:  # pragma: no cover
             raise ValueError(
@@ -745,19 +906,9 @@ class scrump:
             )
 
         core.check_window_size(m, max_size=min(T_A.shape[0], T_B.shape[0]))
-
-        if self._ignore_trivial is False and core.are_arrays_equal(
-            self._T_A, self._T_B
-        ):  # pragma: no cover
-            logger.warning("Arrays T_A, T_B are equal, which implies a self-join.")
-            logger.warning("Try setting `ignore_trivial = True`.")
-
-        if (
-            self._ignore_trivial
-            and core.are_arrays_equal(self._T_A, self._T_B) is False
-        ):  # pragma: no cover
-            logger.warning("Arrays T_A, T_B are not equal, which implies an AB-join.")
-            logger.warning("Try setting `ignore_trivial = False`.")
+        self._ignore_trivial = core.check_ignore_trivial(
+            self._T_A, self._T_B, self._ignore_trivial
+        )
 
         self._n_A = self._T_A.shape[0]
         self._n_B = self._T_B.shape[0]
@@ -774,10 +925,7 @@ class scrump:
 
         self._excl_zone = int(np.ceil(self._m / config.STUMPY_EXCL_ZONE_DENOM))
         if s is None:
-            if self._excl_zone is not None:  # self-join
-                s = self._excl_zone
-            else:  # pragma: no cover  # AB-join
-                s = int(np.ceil(self._m / config.STUMPY_EXCL_ZONE_DENOM))
+            s = self._excl_zone
 
         if pre_scrump:
             if self._ignore_trivial:
@@ -788,10 +936,14 @@ class scrump:
                     σ_Q,
                     M_T,
                     Σ_T,
+                    Q_subseq_isconstant,
+                    T_subseq_isconstant,
                     indices,
                     s,
                     excl_zone,
-                ) = _preprocess_prescrump(T_A, m, s=s)
+                ) = _preprocess_prescrump(
+                    T_A, m, s=s, T_A_subseq_isconstant=T_A_subseq_isconstant
+                )
             else:
                 (
                     T_A,
@@ -800,12 +952,35 @@ class scrump:
                     σ_Q,
                     M_T,
                     Σ_T,
+                    Q_subseq_isconstant,
+                    T_subseq_isconstant,
                     indices,
                     s,
                     excl_zone,
-                ) = _preprocess_prescrump(T_A, m, T_B=T_B, s=s)
+                ) = _preprocess_prescrump(
+                    T_A,
+                    m,
+                    T_B=T_B,
+                    s=s,
+                    T_A_subseq_isconstant=T_A_subseq_isconstant,
+                    T_B_subseq_isconstant=T_B_subseq_isconstant,
+                )
 
-            P, I = _prescrump(T_A, T_B, m, μ_Q, σ_Q, M_T, Σ_T, indices, s, excl_zone, k)
+            P, I = _prescrump(
+                T_A,
+                T_B,
+                m,
+                μ_Q,
+                σ_Q,
+                M_T,
+                Σ_T,
+                Q_subseq_isconstant,
+                T_subseq_isconstant,
+                indices,
+                s,
+                excl_zone,
+                k,
+            )
             core._merge_topk_PI(self._P, P, self._I, I)
 
         if self._ignore_trivial:
@@ -840,6 +1015,14 @@ class scrump:
         Update the (top-k) matrix profile and the (top-k) matrix profile indices by
         computing additional new distances (limited by `percentage`) that make up
         the full distance matrix.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         if self._chunk_idx < self._n_chunks:
             start_idx, stop_idx = self._chunk_diags_ranges[self._chunk_idx]
@@ -848,16 +1031,16 @@ class scrump:
                 self._T_A,
                 self._T_B,
                 self._m,
-                self._M_T,
                 self._μ_Q,
-                self._Σ_T_inverse,
+                self._M_T,
                 self._σ_Q_inverse,
-                self._M_T_m_1,
+                self._Σ_T_inverse,
                 self._μ_Q_m_1,
-                self._T_A_subseq_isfinite,
-                self._T_B_subseq_isfinite,
-                self._T_A_subseq_isconstant,
-                self._T_B_subseq_isconstant,
+                self._M_T_m_1,
+                self._Q_subseq_isfinite,
+                self._T_subseq_isfinite,
+                self._Q_subseq_isconstant,
+                self._T_subseq_isconstant,
                 self._diags[start_idx:stop_idx],
                 self._ignore_trivial,
                 self._k,
@@ -885,6 +1068,14 @@ class scrump:
         is a 1D array consisting of the updated matrix profile. When `k > 1`, the
         output is a 2D array that has exactly `k` columns consisting of the updated
         top-k matrix profile.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         if self._k == 1:
             return self._P.flatten().astype(np.float64)
@@ -898,6 +1089,14 @@ class scrump:
         output is a 1D array consisting of the updated matrix profile indices. When
         `k > 1`, the output is a 2D array that has exactly `k` columns consisting
         of the updated top-k matrix profile indices.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         if self._k == 1:
             return self._I.flatten().astype(np.int64)
@@ -908,6 +1107,14 @@ class scrump:
     def left_I_(self):
         """
         Get the updated left (top-1) matrix profile indices
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         return self._IL.astype(np.int64)
 
@@ -915,5 +1122,13 @@ class scrump:
     def right_I_(self):
         """
         Get the updated right (top-1) matrix profile indices
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         return self._IR.astype(np.int64)

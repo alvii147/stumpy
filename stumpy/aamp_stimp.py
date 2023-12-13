@@ -3,7 +3,11 @@
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
 import numpy as np
-from . import core, aamp, scraamp, aamped
+
+from . import core
+from .aamp import aamp
+from .aamped import aamped
+from .scraamp import scraamp
 
 
 def _normalize_pan(pan, ms, bfs_indices, n_processed, T_min, T_max, p=2.0):
@@ -33,7 +37,9 @@ def _normalize_pan(pan, ms, bfs_indices, n_processed, T_min, T_max, p=2.0):
         The max value in `T`
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Returns
     -------
@@ -41,7 +47,7 @@ def _normalize_pan(pan, ms, bfs_indices, n_processed, T_min, T_max, p=2.0):
     """
     idx = bfs_indices[:n_processed]
     norm = 1.0 / (np.abs(T_max - T_min) * np.power(ms[:n_processed], 1.0 / p))
-    pan[idx] = np.minimum(1.0, pan[idx] * norm[:, np.newaxis])
+    pan[idx] = np.minimum(1.0, pan[idx] * np.expand_dims(norm, 1))
 
 
 class _aamp_stimp:
@@ -78,10 +84,9 @@ class _aamp_stimp:
         computing SCRIMP. If set to `True`, this is equivalent to computing
         SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
-    dask_client : client, default None
-        A Dask Distributed client that is connected to a Dask scheduler and
-        Dask workers. Setting up a Dask distributed cluster is beyond the
-        scope of this library. Please refer to the Dask Distributed
+    client : client, default None
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
         documentation.
 
     device_id : int or list, default None
@@ -90,11 +95,13 @@ class _aamp_stimp:
         computation. A list of all valid device ids can be obtained by
         executing `[device.id for device in numba.cuda.list_devices()]`.
 
-    mp_func : object, default stump
+    mp_func : function, default stump
         The matrix profile function to use when `percentage = 1.0`
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Attributes
     ----------
@@ -128,7 +135,7 @@ class _aamp_stimp:
         step=1,
         percentage=0.01,
         pre_scraamp=True,
-        dask_client=None,
+        client=None,
         device_id=None,
         mp_func=aamp,
         p=2.0,
@@ -164,10 +171,9 @@ class _aamp_stimp:
             computing SCRIMP. If set to `True`, this is equivalent to computing
             SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
-        dask_client : client, default None
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
+        client : client, default None
+            A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+            the scope of this library. Please refer to the Dask or Ray Distributed
             documentation.
 
         device_id : int or list, default None
@@ -176,11 +182,13 @@ class _aamp_stimp:
             computation. A list of all valid device ids can be obtained by
             executing `[device.id for device in numba.cuda.list_devices()]`.
 
-        mp_func : object, default stump
+        mp_func : function, default stump
             The matrix profile function to use when `percentage = 1.0`
 
         p : float, default 2.0
-            The p-norm to apply for computing the Minkowski distance.
+            The p-norm to apply for computing the Minkowski distance. Minkowski distance
+            is typically used with `p` being 1 or 2, which correspond to the Manhattan
+            distance and the Euclidean distance, respectively.
         """
         self._T = T.copy()
         self._T_min = np.min(self._T[np.isfinite(self._T)])
@@ -203,7 +211,7 @@ class _aamp_stimp:
         self._percentage = percentage
         self._pre_scraamp = pre_scraamp
         partial_mp_func = core._get_partial_mp_func(
-            mp_func, dask_client=dask_client, device_id=device_id
+            mp_func, client=client, device_id=device_id
         )
         self._mp_func = partial_mp_func
 
@@ -215,6 +223,10 @@ class _aamp_stimp:
         """
         Update the pan matrix profile by computing a single matrix profile using the
         next available subsequence window size
+
+        Parameters
+        ----------
+        None
 
         Notes
         -----
@@ -318,6 +330,10 @@ class _aamp_stimp:
         """
         Get the transformed (i.e., normalized, contrasted, binarized, and repeated) pan
         matrix profile
+
+        Parameters
+        ----------
+        None
         """
         return self.pan().astype(np.float64)
 
@@ -325,6 +341,10 @@ class _aamp_stimp:
     def M_(self):
         """
         Get all of the (breadth first searched (level) ordered) subsequence window sizes
+
+        Parameters
+        ----------
+        None
         """
         return self._M.astype(np.int64)
 
@@ -378,7 +398,9 @@ class aamp_stimp(_aamp_stimp):
         SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Attributes
     ----------
@@ -446,7 +468,9 @@ class aamp_stimp(_aamp_stimp):
             SCRIMP++. This parameter is ignored when `percentage = 1.0`.
 
         p : float, default 2.0
-            The p-norm to apply for computing the Minkowski distance.
+            The p-norm to apply for computing the Minkowski distance. Minkowski distance
+            is typically used with `p` being 1 or 2, which correspond to the Manhattan
+            distance and the Euclidean distance, respectively.
         """
         super().__init__(
             T,
@@ -468,11 +492,10 @@ class aamp_stimped(_aamp_stimp):
 
     Parameters
     ----------
-    dask_client : client
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
-            documentation.
+    client : client
+        A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+        the scope of this library. Please refer to the Dask or Ray Distributed
+        documentation.
 
     T : numpy.ndarray
         The time series or sequence for which to compute the pan matrix profile
@@ -490,7 +513,9 @@ class aamp_stimped(_aamp_stimp):
         The step between subsequence window sizes
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively.
 
     Attributes
     ----------
@@ -518,7 +543,7 @@ class aamp_stimped(_aamp_stimp):
 
     def __init__(
         self,
-        dask_client,
+        client,
         T,
         min_m=3,
         max_m=None,
@@ -530,10 +555,9 @@ class aamp_stimped(_aamp_stimp):
 
         Parameters
         ----------
-        dask_client : client
-            A Dask Distributed client that is connected to a Dask scheduler and
-            Dask workers. Setting up a Dask distributed cluster is beyond the
-            scope of this library. Please refer to the Dask Distributed
+        client : client
+            A Dask or Ray Distributed client. Setting up a distributed cluster is beyond
+            the scope of this library. Please refer to the Dask or Ray Distributed
             documentation.
 
         T : numpy.ndarray
@@ -550,6 +574,11 @@ class aamp_stimped(_aamp_stimp):
 
         step : int, default 1
             The step between subsequence window sizes
+
+        p : float, default 2.0
+            The p-norm to apply for computing the Minkowski distance. Minkowski distance
+            is typically used with `p` being 1 or 2, which correspond to the Manhattan
+            distance and the Euclidean distance, respectively.
         """
         super().__init__(
             T,
@@ -558,7 +587,7 @@ class aamp_stimped(_aamp_stimp):
             step=step,
             percentage=1.0,
             pre_scraamp=False,
-            dask_client=dask_client,
+            client=client,
             mp_func=aamped,
             p=2.0,
         )

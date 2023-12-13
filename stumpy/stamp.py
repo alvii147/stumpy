@@ -7,7 +7,18 @@ import numpy as np
 from . import core
 
 
-def _mass_PI(Q, T, M_T, Σ_T, trivial_idx=None, excl_zone=0, left=False, right=False):
+def _mass_PI(
+    Q,
+    T,
+    M_T,
+    Σ_T,
+    trivial_idx=None,
+    excl_zone=0,
+    left=False,
+    right=False,
+    T_subseq_isconstant=None,
+    Q_subseq_isconstant=None,
+):
     """
     Compute "Mueen's Algorithm for Similarity Search" (MASS)
 
@@ -25,6 +36,9 @@ def _mass_PI(Q, T, M_T, Σ_T, trivial_idx=None, excl_zone=0, left=False, right=F
     Σ_T : numpy.ndarray
         Sliding standard deviation for `T`
 
+    T_subseq_isconstant : numpy.ndarray
+        A boolean array that indicates whether a subsequence in `T` is constant (True)
+
     trivial_idx : int, default None
         Index for the start of the trivial self-join
 
@@ -39,6 +53,26 @@ def _mass_PI(Q, T, M_T, Σ_T, trivial_idx=None, excl_zone=0, left=False, right=F
     right : bool, default False
         Return the right matrix profiles indices if `True`
 
+    T_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    Q_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether the subsequence in `Q` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `Q` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
     Returns
     -------
     P : numpy.ndarray
@@ -47,7 +81,14 @@ def _mass_PI(Q, T, M_T, Σ_T, trivial_idx=None, excl_zone=0, left=False, right=F
     I : numpy.ndarray
         Matrix profile indices
     """
-    D = core.mass(Q, T, M_T, Σ_T)
+    D = core.mass(
+        Q,
+        T,
+        M_T,
+        Σ_T,
+        T_subseq_isconstant=T_subseq_isconstant,
+        Q_subseq_isconstant=Q_subseq_isconstant,
+    )
 
     if trivial_idx is not None:
         core.apply_exclusion_zone(D, trivial_idx, excl_zone, np.inf)
@@ -86,7 +127,14 @@ def _mass_PI(Q, T, M_T, Σ_T, trivial_idx=None, excl_zone=0, left=False, right=F
     return P, I
 
 
-def stamp(T_A, T_B, m, ignore_trivial=False):
+def stamp(
+    T_A,
+    T_B,
+    m,
+    ignore_trivial=False,
+    T_A_subseq_isconstant=None,
+    T_B_subseq_isconstant=None,
+):
     """
     Compute matrix profile and indices using the "Scalable Time series
     Anytime Matrix Profile" (STAMP) algorithm and MASS (2017 - with FFT).
@@ -105,6 +153,26 @@ def stamp(T_A, T_B, m, ignore_trivial=False):
 
     ignore_trivial : bool, default False
         `True` if this is a self join and `False` otherwise (i.e., AB-join).
+
+    T_A_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_A` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
+
+    T_B_subseq_isconstant : numpy.ndarray or function, default None
+        A boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). Alternatively, a custom, user-defined function that returns a
+        boolean array that indicates whether a subsequence in `T_B` is constant
+        (True). The function must only take two arguments, `a`, a 1-D array,
+        and `w`, the window size, while additional arguments may be specified
+        by currying the user-defined function using `functools.partial`. Any
+        subsequence with at least one np.nan/np.inf will automatically have its
+        corresponding value set to False in this boolean array.
 
     Returns
     -------
@@ -126,7 +194,11 @@ def stamp(T_A, T_B, m, ignore_trivial=False):
     the closest subsequence in T_B. Thus, the array returned will have length
     T_A.shape[0]-m+1
     """
-    T_B, M_T, Σ_T = core.preprocess(T_B, m)
+    T_A_subseq_isconstant = core.rolling_isconstant(T_A, m, T_A_subseq_isconstant)
+    T_B, M_T, Σ_T, T_B_subseq_isconstant = core.preprocess(
+        T_B, m, T_subseq_isconstant=T_B_subseq_isconstant
+    )
+
     T_A = T_A.copy()
     T_A[np.isinf(T_A)] = np.nan
 
@@ -137,17 +209,37 @@ def stamp(T_A, T_B, m, ignore_trivial=False):
         raise ValueError(f"T_B is {T_B.ndim}-dimensional and must be 1-dimensional. ")
 
     core.check_window_size(m, max_size=min(T_A.shape[0], T_B.shape[0]))
+
     subseq_T_A = core.rolling_window(T_A, m)
     excl_zone = int(np.ceil(m / 2))
 
     # Add exclusionary zone
     if ignore_trivial:
         out = [
-            _mass_PI(subseq, T_B, M_T, Σ_T, i, excl_zone)
+            _mass_PI(
+                subseq,
+                T_B,
+                M_T,
+                Σ_T,
+                i,
+                excl_zone,
+                T_subseq_isconstant=T_B_subseq_isconstant,
+                Q_subseq_isconstant=T_A_subseq_isconstant[[i]],
+            )
             for i, subseq in enumerate(subseq_T_A)
         ]
     else:
-        out = [_mass_PI(subseq, T_B, M_T, Σ_T) for subseq in subseq_T_A]
+        out = [
+            _mass_PI(
+                subseq,
+                T_B,
+                M_T,
+                Σ_T,
+                T_subseq_isconstant=T_B_subseq_isconstant,
+                Q_subseq_isconstant=T_A_subseq_isconstant[[i]],
+            )
+            for i, subseq in enumerate(subseq_T_A)
+        ]
     out = np.array(out, dtype=object)
 
     return out

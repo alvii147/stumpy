@@ -2,17 +2,23 @@
 # Copyright 2019 TD Ameritrade. Released under the terms of the 3-Clause BSD license.
 # STUMPY is a trademark of TD Ameritrade IP Company, Inc. All rights reserved.
 
-import logging
+import warnings
 
 import numpy as np
 
+from . import config, core
 from .aamp_mmotifs import aamp_mmotifs
-from . import core, config, mdl, match
+from .motifs import match
+from .mstump import mdl
 
-logger = logging.getLogger(__name__)
 
-
-@core.non_normalized(aamp_mmotifs)
+@core.non_normalized(
+    aamp_mmotifs,
+    exclude=[
+        "normalize",
+        "T_subseq_isconstant",
+    ],
+)
 def mmotifs(
     T,
     P,
@@ -27,19 +33,20 @@ def mmotifs(
     include=None,
     normalize=True,
     p=2.0,
+    T_subseq_isconstant=None,
 ):
     """
     Discover the top motifs for the multi-dimensional time series `T`
 
     Parameters
     ----------
-    T: numpy.ndarray
+    T : numpy.ndarray
         The multi-dimensional time series or sequence
 
-    P: numpy.ndarray
+    P : numpy.ndarray
         Multi-dimensional Matrix Profile of T
 
-    I: numpy.ndarray
+    I : numpy.ndarray
         Multi-dimensional Matrix Profile indices
 
     min_neighbors : int, default 1
@@ -47,37 +54,37 @@ def mmotifs(
         to be considered a motif. This defaults to `1`, which means that a subsequence
         must have at least one similar match in order to be considered a motif.
 
-    max_distance: flaot, default None
+    max_distance : flaot, default None
         Maximal distance that is allowed between a query subsequence
         (a candidate motif) and all subsequences in T to be considered as a match.
         If None, this defaults to
         `np.nanmax([np.nanmean(D) - 2 * np.nanstd(D), np.nanmin(D)])`
         (i.e. at least the closest match will be returned).
 
-    cutoffs: numpy.ndarray or float, default None
+    cutoffs : numpy.ndarray or float, default None
         The largest matrix profile value (distance) for each dimension of the
         multidimensional matrix profile that a multidimenisonal candidate motif is
         allowed to have. If `cutoffs` is a scalar value, then this value will be
         applied to every dimension.
 
-    max_matches: int, default 10
+    max_matches : int, default 10
         The maximum number of similar matches (nearest neighbors) to return for each
         motif. The first match is always the self/trivial-match for each motif.
 
-    max_motifs: int, default 1
+    max_motifs : int, default 1
         The maximum number of motifs to return
 
     atol : float, default 1e-8
         The absolute tolerance parameter. This value will be added to `max_distance`
         when comparing distances between subsequences.
 
-    k: int, default None
+    k : int, default None
         The number of dimensions (`k + 1`) required for discovering all motifs. This
         value is available for doing guided search or, together with `include`, for
         constrained search. If `k is None`, then this will be automatically be computed
         for each motif using MDL (unconstrained search).
 
-    include: numpy.ndarray, default None
+    include : numpy.ndarray, default None
         A list of (zero based) indices corresponding to the dimensions in T that must be
         included in the constrained multidimensional motif search.
 
@@ -87,8 +94,19 @@ def mmotifs(
         equivalent set in the `@core.non_normalized` function decorator.
 
     p : float, default 2.0
-        The p-norm to apply for computing the Minkowski distance. This parameter is
-        ignored when `normalize == True`.
+        The p-norm to apply for computing the Minkowski distance. Minkowski distance is
+        typically used with `p` being 1 or 2, which correspond to the Manhattan distance
+        and the Euclidean distance, respectively. This parameter is ignored when
+        `normalize == True`.
+
+    T_subseq_isconstant : numpy.ndarray, function, or list, default None
+        A parameter that is used to show whether a subsequence of a time series in `T`
+        is constant (True) or not. T_subseq_isconstant can be a 2D boolean numpy.ndarry
+        or a function that can be applied to each time series in `T`. Alternatively, for
+        maximum flexibility, a list (with length equal to the total number of time
+        series) may also be used. In this case, T_subseq_isconstant[i] corresponds to
+        the i-th time series T[i] and each element in the list can either be a 1D
+        boolean np.ndarray, a function, or None.
 
     Returns
     -------
@@ -124,20 +142,37 @@ def mmotifs(
     <https://www.cs.ucr.edu/~eamonn/Motif_Discovery_ICDM.pdf>`__
 
     For more information on `include` and search types, see Section IV D and IV E
+
+    Examples
+    --------
+    >>> import stumpy
+    >>> import numpy as np
+    >>> mps, indices = stumpy.mstump(
+    ...     np.array([[584., -11., 23., 79., 1001., 0., -19.],
+    ...               [  1.,   2.,  4.,  8.,   16., 0.,  32.]]),
+    ...     m=3)
+    >>> stumpy.mmotifs(
+    ...     np.array([[584., -11., 23., 79., 1001., 0., -19.],
+    ...               [  1.,   2.,  4.,  8.,   16., 0.,  32.]]),
+    ...     mps,
+    ...     indices)
+    (array([[4.47034836e-08, 4.47034836e-08]]),  array([[0, 2]]), [array([1])],
+     [array([ 80.      , 111.509775])])
     """
     T = core._preprocess(T)
     m = T.shape[-1] - P.shape[-1] + 1
     reset_k = False
 
     if max_motifs < 1:  # pragma: no cover
-        logger.warning(
-            "The maximum number of motifs, `max_motifs`, "
-            "must be greater than or equal to 1"
-        )
-        logger.warning("`max_motifs` has been set to `1`")
+        msg = "The maximum number of motifs, `max_motifs`, "
+        msg += "must be greater than or equal to 1.\n"
+        msg += "`max_motifs` has been set to `1`"
+        warnings.warn(msg)
         max_motifs = 1
 
-    T, M_T, Σ_T = core.preprocess(T, m)
+    T, M_T, Σ_T, T_subseq_isconstant = core.preprocess(
+        T, m, T_subseq_isconstant=T_subseq_isconstant
+    )
     P = P.copy()
 
     excl_zone = int(np.ceil(m / config.STUMPY_EXCL_ZONE_DENOM))
@@ -196,6 +231,10 @@ def mmotifs(
             query_idx=motif_idx,
             normalize=normalize,
             p=p,
+            T_subseq_isconstant=T_subseq_isconstant[subspace_k],
+            Q_subseq_isconstant=np.expand_dims(
+                T_subseq_isconstant[subspace_k, motif_idx], axis=1
+            ),
         )
 
         if len(query_matches) > min_neighbors:
